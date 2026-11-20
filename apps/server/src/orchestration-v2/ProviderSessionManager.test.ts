@@ -19,6 +19,7 @@ import {
   ProviderInstanceId,
   type ProviderSessionId,
   RunId,
+  type ServerSettingsError,
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
@@ -681,7 +682,10 @@ function layerTest(input: {
   readonly scopeCloseReached?: Deferred.Deferred<void>;
   readonly eventStreamsEnded?: Queue.Queue<ProviderSessionId>;
   readonly releaseRecorded?: Deferred.Deferred<void>;
-  readonly serverSettingsLayer?: ReturnType<typeof ServerSettings.layerTest>;
+  readonly serverSettingsLayer?: Layer.Layer<
+    ServerSettings.ServerSettingsService,
+    ServerSettingsError
+  >;
   readonly projectServiceLayer?: Layer.Layer<ProjectService.ProjectService>;
   readonly installationGateLayer?: Layer.Layer<ProviderInstallationGate.ProviderInstallationGate>;
 }) {

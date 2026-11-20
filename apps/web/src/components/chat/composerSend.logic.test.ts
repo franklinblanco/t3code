@@ -1,6 +1,20 @@
-import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import {
+  CommandId,
+  EnvironmentId,
+  EphemeralEnvironmentLeaseId,
+  EphemeralEnvironmentTemplateId,
+  OrchestrationV2DispatchCommandError,
+  OrchestrationV2ThreadLaunchError,
+  ProjectId,
+  ThreadId,
+  type EphemeralEnvironmentLease,
+} from "@t3tools/contracts";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
-import { describe, expect, it } from "vite-plus/test";
+import * as Cause from "effect/Cause";
+import * as Schema from "effect/Schema";
+import { AsyncResult } from "effect/reactivity";
+import { RpcClientError } from "effect/rpc";
+import { describe, expect, it, vi } from "vite-plus/test";
 import type { ComposerThreadDraftState } from "../../composerDraftStore";
 import { formatInlineContextReference } from "../../lib/composerContextReferences";
 import { threadContextReference } from "../../lib/composerContextRecords";
@@ -11,12 +25,130 @@ import {
   loadBalancingSendWarning,
   multipleModelSendBlock,
   referencedThreadContexts,
+  turnStartDisposition,
+  withEphemeralLease,
 } from "./composerSend.logic";
 
 const local = EnvironmentId.make("local");
 const remote = EnvironmentId.make("remote");
 const localThread = threadContextRecord(scopeThreadRef(local, ThreadId.make("a")), "Local");
 const remoteThread = threadContextRecord(scopeThreadRef(remote, ThreadId.make("b")), "Remote");
+
+const encodeLaunchError = Schema.encodeSync(OrchestrationV2ThreadLaunchError);
+const decodeLaunchError = Schema.decodeSync(OrchestrationV2ThreadLaunchError);
+const launchError = (name: string) => {
+  const error = new OrchestrationV2ThreadLaunchError({
+    commandId: CommandId.make("launch"),
+    projectId: ProjectId.make("project"),
+    message: "Could not launch the thread",
+    cause: Object.assign(new Error("Launch failed"), { name }),
+  });
+  return decodeLaunchError(encodeLaunchError(error));
+};
+
+const dispatchError = (name: string) =>
+  new OrchestrationV2DispatchCommandError({
+    commandId: CommandId.make("dispatch"),
+    commandType: "message.dispatch",
+    message: "Could not dispatch the message",
+    cause: Object.assign(new Error("Dispatch failed"), { name }),
+  });
+
+const rejectedStart = AsyncResult.failure(Cause.fail(launchError("ThreadLaunchBaseRefError")));
+
+it.each([
+  { name: "accepted", result: AsyncResult.success(undefined), expected: "accepted" },
+  { name: "rejected", result: rejectedStart, expected: "rejected" },
+  {
+    name: "dispatch rejection",
+    result: AsyncResult.failure(Cause.fail(dispatchError("OrchestratorCommandRejectedError"))),
+    expected: "rejected",
+  },
+  {
+    name: "dispatch error that can occur after commit",
+    result: AsyncResult.failure(Cause.fail(dispatchError("OrchestratorDispatchError"))),
+    expected: "uncertain",
+  },
+  {
+    name: "lost reply",
+    result: AsyncResult.failure(
+      Cause.fail(
+        new RpcClientError.RpcClientError({
+          reason: new RpcClientError.RpcClientDefect({ message: "Connection lost", cause: null }),
+        }),
+      ),
+    ),
+    expected: "uncertain",
+  },
+  {
+    name: "interrupted",
+    result: AsyncResult.failure(Cause.interrupt()),
+    expected: "uncertain",
+  },
+  {
+    name: "launch error that can occur after commit",
+    result: AsyncResult.failure(Cause.fail(launchError("ThreadLaunchError"))),
+    expected: "uncertain",
+  },
+])("classifies an overflow turn start with a $name result", ({ result, expected }) => {
+  expect(turnStartDisposition(result)).toBe(expected);
+});
+
+it.each([
+  {
+    outcome: "accepted",
+    reused: false,
+    result: AsyncResult.success(undefined),
+    restores: false,
+    releases: false,
+  },
+  { outcome: "rejected", reused: false, result: rejectedStart, restores: true, releases: true },
+  { outcome: "rejected", reused: true, result: rejectedStart, restores: true, releases: false },
+  {
+    outcome: "uncertain",
+    reused: false,
+    result: AsyncResult.failure(Cause.interrupt()),
+    restores: false,
+    releases: false,
+  },
+])(
+  "cleans up a $outcome overflow send (reused=$reused)",
+  async ({ reused, result, restores, releases }) => {
+    const lease: EphemeralEnvironmentLease = {
+      leaseId: EphemeralEnvironmentLeaseId.make("lease"),
+      templateId: EphemeralEnvironmentTemplateId.make("overflow"),
+      generation: 1,
+      state: "ready",
+      allocationHandle: "sandbox",
+      environmentId: remote,
+      httpUrl: "https://overflow.example",
+      wsUrl: "wss://overflow.example",
+      bearerToken: null,
+      pairingToken: null,
+      workspaceRoot: null,
+      clientRequestId: "request",
+      lastError: null,
+      createdAt: "2026-11-10T01:00:00.000Z",
+      updatedAt: "2026-11-10T01:00:00.000Z",
+      idleDeadlineAt: null,
+    };
+    const restoreRoute = vi.fn();
+    const release = vi.fn(async () => {});
+    const send = withEphemeralLease({
+      acquire: async () => ({ lease, reused }),
+      release,
+      prepare: async () => restoreRoute,
+      send: async (onStartSettled) => {
+        onStartSettled(result);
+      },
+    });
+    if (restores) await expect(send).rejects.toThrow("Review the draft and try sending again.");
+    else await expect(send).resolves.toBeUndefined();
+    expect(restoreRoute).toHaveBeenCalledTimes(restores ? 1 : 0);
+    if (releases) expect(release).toHaveBeenCalledExactlyOnceWith(lease.leaseId);
+    else expect(release).not.toHaveBeenCalled();
+  },
+);
 
 it("detects draft edits during upload preparation without treating upload metadata as an edit", () => {
   const draft: ComposerThreadDraftState = {

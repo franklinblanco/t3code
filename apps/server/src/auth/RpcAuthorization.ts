@@ -230,9 +230,11 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.subscribeServerConfig]: AuthOrchestrationReadScope,
   [WS_METHODS.subscribeServerLifecycle]: AuthOrchestrationReadScope,
   [WS_METHODS.subscribeAuthAccess]: AuthAccessReadScope,
-} as const satisfies Readonly<Record<WsRpcMethod, AuthEnvironmentScope>>;
+} as const satisfies Readonly<
+  Record<WsRpcMethod, AuthEnvironmentScope | readonly AuthEnvironmentScope[]>
+>;
 
-export function requiredScopeForRpcMethod(method: string): AuthEnvironmentScope {
+export function requiredScopesForRpcMethod(method: string): readonly AuthEnvironmentScope[] {
   if (!Object.hasOwn(RPC_REQUIRED_SCOPES, method)) {
     throw new Error(`RPC method ${method} has no declared authorization scope.`);
   }
@@ -240,7 +242,7 @@ export function requiredScopeForRpcMethod(method: string): AuthEnvironmentScope 
   if (requiredScope === undefined) {
     throw new Error(`RPC method ${method} has no declared authorization scope.`);
   }
-  return requiredScope;
+  return typeof requiredScope === "string" ? [requiredScope] : requiredScope;
 }
 
 export const rpcAuthorizationError = (requiredScope: AuthEnvironmentScope) =>
@@ -326,7 +328,7 @@ const requiredScopesForRpcCall = (
     return requiredScopesForProjectMutation(decodeProjectMutation(payload));
   }
   const guarded = clientRpcRequiredScopes(method, payload);
-  const scopes = guarded.length > 0 ? guarded : [requiredScopeForRpcMethod(method)];
+  const scopes = guarded.length > 0 ? guarded : requiredScopesForRpcMethod(method);
   return sendsProviderSignOutPrompt(method, payload)
     ? [...scopes, AuthProvidersManageScope]
     : scopes;

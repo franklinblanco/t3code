@@ -5,11 +5,7 @@ import { createCommandPermissions } from "./commandPermissions.ts";
 import { followStreamInEnvironment } from "./environmentStreams.ts";
 import { reuseUnchanged } from "./serverConfigProjection.ts";
 export { runStreamInEnvironment, followStreamInEnvironment } from "./environmentStreams.ts";
-import {
-  type ClientGuardedRpcTag,
-  EnvironmentId,
-  type EnvironmentId as EnvironmentIdType,
-} from "@t3tools/contracts";
+import { EnvironmentId, type EnvironmentId as EnvironmentIdType } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -33,7 +29,6 @@ import {
   type EnvironmentSubscriptionRpcTag,
   type EnvironmentUnaryRpcTag,
   EnvironmentRpcUnavailableError,
-  request,
   requestGuarded,
   RpcPermissionGuard,
   subscribe,
@@ -1005,11 +1000,7 @@ export function createEnvironmentCommand<R, ER, Input, A, E>(
   });
 }
 
-export function createEnvironmentRpcQueryAtomFamily<
-  R,
-  ER,
-  TTag extends Exclude<EnvironmentUnaryRpcTag, ClientGuardedRpcTag>,
->(
+export function createEnvironmentRpcQueryAtomFamily<R, ER, TTag extends EnvironmentUnaryRpcTag>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry.EnvironmentRegistry | R, ER>,
   options: {
     readonly label: string;
@@ -1035,6 +1026,7 @@ export function createEnvironmentRpcQueryAtomFamily<
     readonly onAnswer?: QueryAnswerHandler<EnvironmentRpcInput<TTag>, EnvironmentRpcSuccess<TTag>>;
   },
 ) {
+  const permissions = createCommandPermissions(runtime, options.tag);
   return createEnvironmentQueryAtomFamily(runtime, {
     label: options.label,
     ...(options.persistence === undefined ? {} : { persistence: options.persistence }),
@@ -1050,7 +1042,19 @@ export function createEnvironmentRpcQueryAtomFamily<
       input: EnvironmentRpcInput<TTag>,
       emit: (value: EnvironmentRpcSuccess<TTag>) => Effect.Effect<void>,
       previous: Option.Option<EnvironmentRpcSuccess<TTag>>,
-    ) => options.execute?.(input, emit, previous) ?? request(options.tag, input),
+    ) => {
+      const execute =
+        options.execute?.(input, emit, previous) ?? requestGuarded(options.tag, input);
+      if (permissions.requiredScopes(input).length === 0) return execute;
+      return Effect.flatMap(AtomRegistry.AtomRegistry, (registry) =>
+        execute.pipe(
+          Effect.provideService(RpcPermissionGuard, {
+            authorize: (environmentId, method, payload) =>
+              createCommandPermissions(runtime, method).authorize(registry, environmentId, payload),
+          }),
+        ),
+      );
+    },
   });
 }
 

@@ -11,10 +11,14 @@ import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   AuthSessionId,
+  AuthSettingsWriteScope,
+  AuthTerminalOperateScope,
   AuthSourceControlWriteScope,
   ORCHESTRATION_PROTOCOL_VERSION,
   ORCHESTRATION_PROTOCOL_QUERY_PARAM,
   EnvironmentId,
+  EphemeralEnvironmentError,
+  EphemeralEnvironmentTemplateId,
   EventId,
   GitManagerError,
   VcsProcessSpawnError,
@@ -32,6 +36,7 @@ import {
   WsServerRefreshProvidersRpc,
   WsSubscribeServerConfigRpc,
   type AuthAccessStreamEvent,
+  type AuthEnvironmentScope,
   type OrchestrationV2AppThread,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2StoredEvent,
@@ -100,6 +105,7 @@ import * as OtlpEndpointCheck from "./observability/OtlpEndpointCheck.ts";
 import * as PairingGrantStore from "./auth/PairingGrantStore.ts";
 import * as RpcAuthorization from "./auth/RpcAuthorization.ts";
 import * as PeerLinkRequests from "./peer/PeerLinkRequests.ts";
+import * as EphemeralEnvironmentManager from "./environment/EphemeralEnvironmentManager.ts";
 import * as PeerLinks from "./peer/PeerLinks.ts";
 import * as PortScanner from "./preview/PortScanner.ts";
 import * as PreviewManager from "./preview/Manager.ts";
@@ -846,6 +852,7 @@ const layerUnusedConfigRpcServices = Layer.mergeAll(
   Layer.mock(OtlpEndpointCheck.OtlpEndpointCheck)({}),
   Layer.mock(PairingGrantStore.PairingGrantStore)({}),
   Layer.mock(PeerLinks.PeerLinks)({}),
+  Layer.mock(EphemeralEnvironmentManager.EphemeralEnvironmentManager)({}),
   Layer.mock(PeerLinkRequests.PeerLinkRequests)({}),
   Layer.mock(PortScanner.PortDiscovery)({ trackAgent: () => () => undefined }),
   Layer.mock(PreviewManager.PreviewManager)({}),
@@ -1909,6 +1916,127 @@ it.effect("a missing thread worktree gets its project's skills in the cwd snapsh
       ),
     ),
   ),
+);
+
+it.effect(
+  "fences ephemeral template mutations and binds acquisition to the authenticated session",
+  () =>
+    Effect.gen(function* () {
+      const templateId = EphemeralEnvironmentTemplateId.make("worker");
+      const template = {
+        id: templateId,
+        label: "Worker",
+        enabled: true,
+        weight: 50,
+        provisioner: {
+          kind: "command" as const,
+          provisionCommand: "create-worker",
+          provisionTimeoutSeconds: 10,
+        },
+        idleTimeoutMinutes: 15,
+        maxConcurrentLeases: 1,
+        eligibleRepositoryKeys: [],
+      };
+      const sessionId = AuthSessionId.make("ephemeral-test");
+      const settings = yield* ServerSettings.ServerSettingsService;
+      const updateTemplates = yield* ServerSettings.EphemeralEnvironmentTemplateSettings;
+      const attemptedPatch = {
+        defaultAutoPull: !(yield* settings.getSettings).defaultAutoPull,
+        ephemeralEnvironmentTemplates: [],
+      };
+      const acquiredBy: AuthSessionId[] = [];
+      const services = Layer.mergeAll(
+        layerUnusedConfigRpcServices,
+        Layer.mock(EphemeralEnvironmentManager.EphemeralEnvironmentManager)({
+          upsertTemplate: ({ template }) =>
+            updateTemplates(() => [template]).pipe(Effect.orDie, Effect.as(template)),
+          deleteTemplate: ({ templateId }) =>
+            updateTemplates((templates) =>
+              templates.filter((template) => template.id !== templateId),
+            ).pipe(Effect.orDie, Effect.asVoid),
+          acquire: (_input, callerId) =>
+            Effect.sync(() => acquiredBy.push(callerId)).pipe(
+              Effect.andThen(
+                Effect.fail(new EphemeralEnvironmentError({ message: "fixture acquire" })),
+              ),
+            ),
+        }),
+        Layer.mock(ExternalLauncher.ExternalLauncher)({}),
+        Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+        Layer.mock(UsageLimitSources.UsageLimitSources)({}),
+        Layer.mock(RemoteOpenTargets.RemoteOpenTargets)({}),
+        Layer.mock(DirectEndpoints.DirectEndpoints)({}),
+        Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/unused" }),
+        Layer.mock(ScratchThreadPromotion.ScratchThreadPromotion)({}),
+        Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+        Layer.mock(EnvironmentAuth.EnvironmentAuth)({}),
+      );
+      const browser = yield* ServerBrowser.ServerBrowser;
+      const connect = (scopes: readonly AuthEnvironmentScope[]) =>
+        RpcTest.makeClient(WsRpcGroup).pipe(
+          Effect.provide(
+            layerWsRpc(
+              { sessionId, subject: "ephemeral-test", method: "browser-session-cookie", scopes },
+              {},
+              browser,
+              () => Effect.void,
+              { secretReferences: true },
+            ).pipe(Layer.provide(services), Layer.merge(RpcAuthorization.layer(scopes))),
+          ),
+        );
+
+      const authorized = yield* connect([AuthSettingsWriteScope, AuthTerminalOperateScope]);
+      assert.deepEqual(
+        yield* authorized[WS_METHODS.ephemeralEnvironmentsUpsertTemplate]({ template }),
+        template,
+      );
+      for (const [granted, missing] of [
+        [AuthSettingsWriteScope, AuthTerminalOperateScope],
+        [AuthTerminalOperateScope, AuthSettingsWriteScope],
+      ] as const) {
+        const limited = yield* connect([granted]);
+        assert.include(
+          yield* Effect.flip(
+            limited[WS_METHODS.ephemeralEnvironmentsUpsertTemplate]({
+              template: { ...template, label: "Changed" },
+            }),
+          ),
+          { requiredPermission: missing },
+        );
+        assert.include(
+          yield* Effect.flip(
+            limited[WS_METHODS.ephemeralEnvironmentsDeleteTemplate]({ templateId }),
+          ),
+          { requiredPermission: missing },
+        );
+      }
+      const settingsOnly = yield* connect([AuthSettingsWriteScope]);
+      const updated = yield* settingsOnly[WS_METHODS.serverUpdateSettings]({
+        patch: attemptedPatch,
+      });
+      assert.equal(updated.defaultAutoPull, attemptedPatch.defaultAutoPull);
+      assert.deepEqual(updated.ephemeralEnvironmentTemplates, [template]);
+      yield* authorized[WS_METHODS.ephemeralEnvironmentsDeleteTemplate]({ templateId });
+      assert.deepEqual((yield* settings.getSettings).ephemeralEnvironmentTemplates, []);
+
+      const operator = yield* connect([AuthOrchestrationOperateScope]);
+      const request = { templateId, clientRequestId: "request-1", callerId: "spoofed-session" };
+      assert.include(
+        yield* Effect.flip(operator[WS_METHODS.ephemeralEnvironmentsAcquire](request)),
+        {
+          message: "fixture acquire",
+        },
+      );
+      assert.deepEqual(acquiredBy, [sessionId]);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          Layer.fresh(layerConfigSources),
+          Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
+          Layer.mock(ServerBrowser.ServerBrowser)({}),
+        ),
+      ),
+    ),
 );
 
 it.effect("a git action that fails partway still refreshes the repository status", () =>

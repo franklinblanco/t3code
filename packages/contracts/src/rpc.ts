@@ -27,6 +27,17 @@ import {
   PeerLinkSummary,
 } from "./peerLink.ts";
 import {
+  EphemeralEnvironmentAcquireInput,
+  EphemeralEnvironmentAcquireResult,
+  EphemeralEnvironmentDeleteTemplateInput,
+  EphemeralEnvironmentError,
+  EphemeralEnvironmentListResult,
+  EphemeralEnvironmentReleaseInput,
+  EphemeralEnvironmentReleaseResult,
+  EphemeralEnvironmentTemplateSchema,
+  EphemeralEnvironmentUpsertTemplateInput,
+} from "./ephemeralEnvironment.ts";
+import {
   ChatGptReconnectProfileInput,
   ChatGptReconnectProfile,
   ChatGptImportProfileInput,
@@ -549,6 +560,11 @@ export const WS_METHODS = {
   peerLinksLink: "peerLinks.link",
   peerLinksUnlink: "peerLinks.unlink",
   peerLinksAnswerRequest: "peerLinks.answerRequest",
+  ephemeralEnvironmentsList: "ephemeralEnvironments.list",
+  ephemeralEnvironmentsUpsertTemplate: "ephemeralEnvironments.upsertTemplate",
+  ephemeralEnvironmentsDeleteTemplate: "ephemeralEnvironments.deleteTemplate",
+  ephemeralEnvironmentsAcquire: "ephemeralEnvironments.acquire",
+  ephemeralEnvironmentsRelease: "ephemeralEnvironments.release",
   serverGetSettings: "server.getSettings",
   serverUpdateSettings: "server.updateSettings",
   serverDiscoverSourceControl: "server.discoverSourceControl",
@@ -905,6 +921,41 @@ const WsPeerLinksUnlinkRpc = Rpc.make(WS_METHODS.peerLinksUnlink, {
 const WsPeerLinksAnswerRequestRpc = Rpc.make(WS_METHODS.peerLinksAnswerRequest, {
   payload: PeerLinkRequestAnswerInput,
   error: Schema.Union([PeerLinkRequestError, EnvironmentAuthorizationError]),
+});
+
+const WsEphemeralEnvironmentsListRpc = Rpc.make(WS_METHODS.ephemeralEnvironmentsList, {
+  payload: Schema.Struct({}),
+  success: EphemeralEnvironmentListResult,
+  error: Schema.Union([EphemeralEnvironmentError, EnvironmentAuthorizationError]),
+});
+
+const WsEphemeralEnvironmentsUpsertTemplateRpc = Rpc.make(
+  WS_METHODS.ephemeralEnvironmentsUpsertTemplate,
+  {
+    payload: EphemeralEnvironmentUpsertTemplateInput,
+    success: EphemeralEnvironmentTemplateSchema,
+    error: Schema.Union([EphemeralEnvironmentError, EnvironmentAuthorizationError]),
+  },
+);
+
+const WsEphemeralEnvironmentsDeleteTemplateRpc = Rpc.make(
+  WS_METHODS.ephemeralEnvironmentsDeleteTemplate,
+  {
+    payload: EphemeralEnvironmentDeleteTemplateInput,
+    error: Schema.Union([EphemeralEnvironmentError, EnvironmentAuthorizationError]),
+  },
+);
+
+const WsEphemeralEnvironmentsAcquireRpc = Rpc.make(WS_METHODS.ephemeralEnvironmentsAcquire, {
+  payload: EphemeralEnvironmentAcquireInput,
+  success: EphemeralEnvironmentAcquireResult,
+  error: Schema.Union([EphemeralEnvironmentError, EnvironmentAuthorizationError]),
+});
+
+const WsEphemeralEnvironmentsReleaseRpc = Rpc.make(WS_METHODS.ephemeralEnvironmentsRelease, {
+  payload: EphemeralEnvironmentReleaseInput,
+  success: EphemeralEnvironmentReleaseResult,
+  error: Schema.Union([EphemeralEnvironmentError, EnvironmentAuthorizationError]),
 });
 
 // No in-tree caller; installed Swift TestFlight builds still request it.
@@ -2305,6 +2356,11 @@ export const WsRpcGroup = RpcGroup.make(
   WsPeerLinksLinkRpc,
   WsPeerLinksUnlinkRpc,
   WsPeerLinksAnswerRequestRpc,
+  WsEphemeralEnvironmentsListRpc,
+  WsEphemeralEnvironmentsUpsertTemplateRpc,
+  WsEphemeralEnvironmentsDeleteTemplateRpc,
+  WsEphemeralEnvironmentsAcquireRpc,
+  WsEphemeralEnvironmentsReleaseRpc,
   WsServerDiscoverSourceControlRpc,
   WsServerCheckSecretSourceRpc,
   WsServerSearchAcpRegistryRpc,

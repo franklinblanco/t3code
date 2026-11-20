@@ -49,6 +49,12 @@ import {
 import { useQueuedRunEdit } from "./chat/useQueuedRunEdit";
 import { recallCheckoutIsRepo, rememberCheckoutIsRepo } from "./ChatView.logic";
 import { useLogicalProjectEnvironments } from "../hooks/useLogicalProjectEnvironments";
+import { chooseEphemeralOverflowTemplate } from "@t3tools/client-runtime/load-balancing";
+import {
+  isEphemeralConnection,
+  selectEphemeralControllerId,
+  useEphemeralEnvironments,
+} from "../state/ephemeralEnvironments";
 import { useStableCallback } from "../hooks/useStableCallback";
 import { useProjectScriptEditing } from "./chat/useProjectScriptEditing";
 import { RightPanelSurfaceContent } from "./chat/RightPanelSurfaceContent";
@@ -83,6 +89,7 @@ import {
   type ThreadId,
   ProviderInteractionMode,
   resolveIdleCompaction,
+  repositoryGroupingKeyOf,
   RuntimeMode,
 } from "@t3tools/contracts";
 import {
@@ -1253,15 +1260,10 @@ export default function ChatView(props: ChatViewProps) {
     activeProjectIsScratch && draftId !== null,
   );
   const hasMultipleEnvironments = logicalProjectEnvironments.length > 1;
-  const canAutoBalanceEnvironments = hasMultipleEnvironments && !activeProjectIsScratch;
   const activeEnvironmentOption =
     logicalProjectEnvironments.find(
       (environment) => environment.environmentId === activeThread?.environmentId,
     ) ?? null;
-  const showComposerEnvironmentIndicator = shouldShowEnvironmentIndicator({
-    activeEnvironment: activeEnvironmentOption,
-    canPickEnvironment: hasMultipleEnvironments,
-  });
 
   const pullRequestLinking = usePullRequestLinking(environmentId);
   // Best effort: the thread already exists, so a failed link is only logged.
@@ -1333,16 +1335,41 @@ export default function ChatView(props: ChatViewProps) {
       hasRuntime: activeRuntime !== null,
       activeProviderThreadId: serverThread?.activeProviderThreadId ?? null,
     });
-  // onEnvironmentChange only retargets an unsent draft. envLocked alone does not
-  // rule out a started thread: one whose machine is offline never loads its
-  // messages, so it would otherwise be offered a machine picker that does nothing.
-  const canChangeEnvironment =
-    hasMultipleEnvironments && !envLocked && draftId !== null && !draftThread?.promotedTo;
-
   const loadBalancingSettings = useClientSettings((settings) => ({
     loadBalancingEnabled: settings.loadBalancingEnabled,
     loadBalancingWeights: settings.loadBalancingWeights,
   }));
+  const overflowControllerId =
+    draftId && !envLocked && !activeProjectIsScratch && loadBalancingSettings.loadBalancingEnabled
+      ? selectEphemeralControllerId(primaryEnvironment?.environmentId ?? null, environments)
+      : null;
+  const ephemeralData = AsyncResult.getOrElse(
+    useEphemeralEnvironments(overflowControllerId),
+    () => null,
+  );
+  const repositoryKey = activeProject?.repositoryIdentity
+    ? repositoryGroupingKeyOf(activeProject.repositoryIdentity)
+    : null;
+  const overflow =
+    ephemeralData && referencedThreadContexts.length === 0
+      ? chooseEphemeralOverflowTemplate({
+          templates: ephemeralData.templates,
+          activeLeases: ephemeralData.leases,
+          repositoryKey,
+        })
+      : null;
+  const canAutoBalanceEnvironments =
+    (hasMultipleEnvironments || overflow !== null) && !activeProjectIsScratch;
+  // A started thread on an offline environment can look unlocked until its messages load.
+  const canChangeEnvironment =
+    (hasMultipleEnvironments || overflow !== null) &&
+    !envLocked &&
+    draftId !== null &&
+    !draftThread?.promotedTo;
+  const showComposerEnvironmentIndicator = shouldShowEnvironmentIndicator({
+    activeEnvironment: activeEnvironmentOption,
+    canPickEnvironment: hasMultipleEnvironments || overflow !== null,
+  });
   const automaticEnvironment = Boolean(
     clientSettingsHydrated &&
     draftId &&
@@ -1350,16 +1377,19 @@ export default function ChatView(props: ChatViewProps) {
     canAutoBalanceEnvironments &&
     loadBalancingSettings.loadBalancingEnabled &&
     draftThread?.environmentSelection !== "manual" &&
-    (!composerHasAttachments || Boolean(draftThread?.loadBalancedEnvironmentId)) &&
+    (!composerHasAttachments ||
+      Boolean(draftThread?.loadBalancedEnvironmentId) ||
+      (!hasMultipleEnvironments && overflow !== null)) &&
     (!draftThread?.branch || draftThread.environmentSelection === "auto") &&
     !draftThread?.worktreePath,
   );
-  const autoUpdateEnvironments = automaticEnvironment
-    ? logicalProjectEnvironments.flatMap(({ environmentId }) => {
-        const environment = environmentById.get(environmentId);
-        return environment ? [environment] : [];
-      })
-    : EMPTY_AUTO_UPDATE_ENVIRONMENTS;
+  const autoUpdateEnvironments =
+    automaticEnvironment && hasMultipleEnvironments
+      ? logicalProjectEnvironments.flatMap(({ environmentId }) => {
+          const environment = environmentById.get(environmentId);
+          return environment && !isEphemeralConnection(environment.entry) ? [environment] : [];
+        })
+      : EMPTY_AUTO_UPDATE_ENVIRONMENTS;
   const systemComposerBannerItems = useSystemComposerBanners({
     activeEnvironment,
     activeEnvironmentUnavailable,
@@ -1367,7 +1397,7 @@ export default function ChatView(props: ChatViewProps) {
     activeThreadEnvironmentId: activeThread?.environmentId ?? null,
     serverConfig,
     hasMultipleRegisteredEnvironments: environments.length > 1,
-    automaticEnvironment,
+    automaticEnvironment: automaticEnvironment && hasMultipleEnvironments,
     autoUpdateEnvironments,
   });
   const providerInstanceEntries = providerInstanceEntriesFor(
@@ -1855,6 +1885,8 @@ export default function ChatView(props: ChatViewProps) {
     needsLoadBalancing,
     loadBalancing,
     refreshBeforeSend,
+    retargetForOverflow,
+    ephemeralOverflowTemplate,
     onAutoEnvironmentStable,
     autoEnvironmentLabel,
     isEnvironmentChanging,
@@ -1877,7 +1909,13 @@ export default function ChatView(props: ChatViewProps) {
     activeProjectIsScratch,
     projectGroupingSettings,
     sendInFlightRef,
+    overflow,
   });
+  const canSendThroughOverflow =
+    automaticEnvironment &&
+    overflow !== null &&
+    (ephemeralOverflowTemplate !== null ||
+      (needsLoadBalancing ? loadBalancing.pending : !composerHasAttachments));
 
   const { focusComposer: focusComposerStable, scheduleComposerFocus: scheduleComposerFocusStable } =
     useComposerFocus(composerRef);
@@ -2985,7 +3023,7 @@ export default function ChatView(props: ChatViewProps) {
     scrollToEnd,
     setThreadError,
   });
-  const { onSend } = useComposerSend({
+  const { onSend, provisioningEnvironmentLabel } = useComposerSend({
     environmentId,
     routeThreadKey,
     currentRouteThreadKeyRef,
@@ -3034,6 +3072,11 @@ export default function ChatView(props: ChatViewProps) {
     needsLoadBalancing,
     loadBalancing,
     refreshBeforeSend,
+    retargetForOverflow,
+    overflowControllerId,
+    overflowRepositoryKey: repositoryKey,
+    overflowDriver: selectedProvider,
+    overflowProviderInstanceId: activeProviderInstanceId,
     readPendingEnvironmentChange,
     pendingApprovals,
     respondingRequestIds,
@@ -3700,6 +3743,7 @@ export default function ChatView(props: ChatViewProps) {
                             {!composerMounted ? null : (
                               <ChatComposer
                                 canOperateThread={canOperateThread}
+                                canSendThroughOverflow={canSendThroughOverflow}
                                 reportedModelSelection={reportedModelSelection}
                                 multipleModelSelections={multipleModelSelections}
                                 supportsMultipleModels={
@@ -3731,6 +3775,7 @@ export default function ChatView(props: ChatViewProps) {
                                 canSteer={!compactionBlocksSteer}
                                 canInterrupt={canInterruptRunningThread}
                                 isSendBusy={
+                                  provisioningEnvironmentLabel !== null ||
                                   (isSendBusy && !sendQueuesBehindSetup) ||
                                   (setupQueueSendThreadKey !== null &&
                                     setupQueueSendThreadKey === activeThreadKey) ||
@@ -3740,7 +3785,7 @@ export default function ChatView(props: ChatViewProps) {
                                 canResume={canResume}
                                 isRevertingCheckpoint={isRevertingCheckpoint}
                                 sendDisabledReason={
-                                  !canOperateThread
+                                  !canOperateThread && !canSendThroughOverflow
                                     ? gt("This connection cannot change threads.")
                                     : isEnvironmentChanging
                                       ? gt("Preparing machine")
@@ -3891,7 +3936,13 @@ export default function ChatView(props: ChatViewProps) {
                                   {...(canChangeEnvironment
                                     ? { onEnvironmentChange: onEnvironmentChangeStable }
                                     : {})}
-                                  autoEnvironmentLabel={autoEnvironmentLabel}
+                                  autoEnvironmentLabel={
+                                    provisioningEnvironmentLabel
+                                      ? gt("Provisioning {environment}…", {
+                                          environment: provisioningEnvironmentLabel,
+                                        })
+                                      : autoEnvironmentLabel
+                                  }
                                   onAutoEnvironment={
                                     draftId &&
                                     !envLocked &&
@@ -3990,7 +4041,13 @@ export default function ChatView(props: ChatViewProps) {
                   isGitRepo={isGitRepo}
                   envLocked={envLocked}
                   availableEnvironments={logicalProjectEnvironments}
-                  autoEnvironmentLabel={autoEnvironmentLabel}
+                  autoEnvironmentLabel={
+                    provisioningEnvironmentLabel
+                      ? gt("Provisioning {environment}…", {
+                          environment: provisioningEnvironmentLabel,
+                        })
+                      : autoEnvironmentLabel
+                  }
                   onAutoEnvironment={
                     draftId &&
                     !envLocked &&

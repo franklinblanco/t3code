@@ -1,8 +1,96 @@
-import type { EnvironmentId, ThreadContextRecord } from "@t3tools/contracts";
+import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
+import {
+  EnvironmentAuthorizationError,
+  OrchestrationV2DispatchCommandError,
+  OrchestrationV2GetThreadProjectionError,
+  OrchestrationV2ThreadLaunchError,
+  PersistChatAttachmentsError,
+  type EnvironmentId,
+  type EphemeralEnvironmentAcquireResult,
+  type EphemeralEnvironmentLeaseId,
+  type ThreadContextRecord,
+} from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import { msg } from "gt-react";
 import { m, type MessageResolver } from "../../i18n/messages";
 import { collectInlineContextIds } from "../../lib/composerContextReferences";
 import type { ComposerThreadDraftState } from "../../composerDraftStore";
+
+const isRejectedBeforeTurnStart = Schema.is(
+  Schema.Union([
+    EnvironmentAuthorizationError,
+    OrchestrationV2GetThreadProjectionError,
+    PersistChatAttachmentsError,
+  ]),
+);
+const isStartCommandError = Schema.is(
+  Schema.Union([OrchestrationV2ThreadLaunchError, OrchestrationV2DispatchCommandError]),
+);
+const preCommitRejectionNames = new Set([
+  "OrchestratorCommandRejectedError",
+  "OrchestratorThreadAlreadyExistsError",
+  "OrchestratorProjectionError",
+  "OrchestratorProviderAdapterError",
+  "OrchestratorCommandPreviouslyRejectedError",
+  "OrchestratorCommandIdConflictError",
+  "OrchestratorSubagentThreadReadOnlyError",
+  "OrchestratorThreadAboveModeLimitError",
+  "OrchestratorProviderSelectionBusyError",
+  "OrchestratorRuntimeModeAboveCeilingError",
+  "ThreadManagementWorktreeRestoreError",
+  "AttachmentClaimError",
+  "ServerRuntimeStartupError",
+  "ThreadManagementProviderInstanceDisabledError",
+  "ThreadLaunchBaseRefError",
+  "ThreadLaunchBranchExistsError",
+  "ThreadLaunchBranchConflictError",
+  "ThreadLaunchNotRepositoryError",
+]);
+
+export function turnStartDisposition(result: AtomCommandResult<unknown, unknown>) {
+  if (result._tag === "Success") return "accepted";
+  // Generic launch and dispatch errors can arrive after the turn commits.
+  const rejected =
+    result.cause.reasons.length > 0 &&
+    result.cause.reasons.every(
+      (reason) =>
+        reason._tag === "Fail" &&
+        (isRejectedBeforeTurnStart(reason.error) ||
+          (isStartCommandError(reason.error) &&
+            reason.error.cause instanceof Error &&
+            preCommitRejectionNames.has(reason.error.cause.name))),
+    );
+  return rejected ? "rejected" : "uncertain";
+}
+
+export async function withEphemeralLease(input: {
+  readonly acquire: () => Promise<EphemeralEnvironmentAcquireResult>;
+  readonly release: (leaseId: EphemeralEnvironmentLeaseId) => Promise<void>;
+  readonly prepare: (lease: EphemeralEnvironmentAcquireResult["lease"]) => Promise<() => void>;
+  readonly send: (
+    onStartSettled: (result: AtomCommandResult<unknown, unknown>) => void,
+  ) => Promise<void>;
+}) {
+  // Keep waiting for the result after cancellation so a new lease can still be released.
+  const { lease, reused } = await input.acquire();
+  let dispatched = false;
+  let restoreRoute: (() => void) | undefined;
+  try {
+    restoreRoute = await input.prepare(lease);
+    await input.send((result) => {
+      if (turnStartDisposition(result) !== "rejected") dispatched = true;
+    });
+    if (!dispatched) throw new Error(m(msg("Review the draft and try sending again.")));
+  } finally {
+    if (!dispatched) {
+      try {
+        restoreRoute?.();
+      } finally {
+        if (!reused) await input.release(lease.leaseId);
+      }
+    }
+  }
+}
 
 /** Compare immutable user content without copying image bytes or upload metadata. */
 export function composerDraftContentChanged(

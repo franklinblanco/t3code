@@ -16,6 +16,7 @@ import {
   AuthProvidersManageScope,
   AuthSettingsWriteScope,
   AuthSourceControlWriteScope,
+  AuthTerminalOperateScope,
   ThreadId,
   EnvironmentId,
   ORCHESTRATION_V2_WS_METHODS,
@@ -153,20 +154,50 @@ describe("command permissions", () => {
   );
 
   it.effect.each([
-    { method: WS_METHODS.serverRunStorageCleanup, scope: AuthSettingsWriteScope },
-    { method: WS_METHODS.serverReclaimDatabaseSpace, scope: AuthEnvironmentMaintainScope },
-  ])("requires the destination $scope grant for $method", ({ method, scope }) =>
+    { method: WS_METHODS.serverRunStorageCleanup, scopes: [AuthSettingsWriteScope] },
+    { method: WS_METHODS.serverReclaimDatabaseSpace, scopes: [AuthEnvironmentMaintainScope] },
+    { method: WS_METHODS.ephemeralEnvironmentsList, scopes: [AuthOrchestrationOperateScope] },
+    {
+      method: WS_METHODS.ephemeralEnvironmentsUpsertTemplate,
+      scopes: [AuthSettingsWriteScope, AuthTerminalOperateScope],
+    },
+    {
+      method: WS_METHODS.ephemeralEnvironmentsDeleteTemplate,
+      scopes: [AuthSettingsWriteScope, AuthTerminalOperateScope],
+    },
+    { method: WS_METHODS.ephemeralEnvironmentsAcquire, scopes: [AuthOrchestrationOperateScope] },
+    { method: WS_METHODS.ephemeralEnvironmentsRelease, scopes: [AuthOrchestrationOperateScope] },
+  ])("requires every destination scope for $method", ({ method, scopes }) =>
     Effect.gen(function* () {
       const registry = yield* setup;
       const command = createCommandPermissions(runtime, method);
-      registry.set(sessions(env), AsyncResult.success(grant(true)));
+      registry.set(
+        sessions(env),
+        AsyncResult.success({
+          ...grant(false),
+          scopes: [AuthOrchestrationReadScope],
+          permissions: [AuthOrchestrationReadScope],
+        }),
+      );
       expect(registry.get(command.permissionAtom(env))).toBe(false);
       expect((yield* command.authorize(registry, env).pipe(Effect.flip))._tag).toBe(
         "EnvironmentAuthorizationError",
       );
+      if (scopes.length > 1) {
+        for (const scope of scopes) {
+          registry.set(
+            sessions(env),
+            AsyncResult.success({ ...grant(true), scopes: [scope], permissions: [scope] }),
+          );
+          expect(registry.get(command.permissionAtom(env))).toBe(false);
+          expect((yield* command.authorize(registry, env).pipe(Effect.flip))._tag).toBe(
+            "EnvironmentAuthorizationError",
+          );
+        }
+      }
       registry.set(
         sessions(env),
-        AsyncResult.success({ ...grant(true), scopes: [scope], permissions: [scope] }),
+        AsyncResult.success({ ...grant(true), scopes, permissions: scopes }),
       );
       expect(registry.get(command.permissionAtom(env))).toBe(true);
       yield* command.authorize(registry, env);

@@ -16,6 +16,7 @@ import {
   ServerSettings,
   ServerSettingsError,
   type ServerSettingsPatch,
+  type EphemeralEnvironmentTemplate,
   type ManagedPolicySummary,
   globalIdleCompaction,
   isSecretReference,
@@ -252,6 +253,25 @@ function ensureProviderInstanceMutationAllowed(
   return Effect.void;
 }
 
+const applyGenericSettingsPatch = (
+  current: ServerSettings,
+  patch: ServerSettingsPatch,
+): ServerSettings => ({
+  ...applyServerSettingsPatch(current, patch),
+  ephemeralEnvironmentTemplates: current.ephemeralEnvironmentTemplates,
+});
+
+type UpdateEphemeralEnvironmentTemplates = (
+  update: (
+    templates: readonly EphemeralEnvironmentTemplate[],
+  ) => readonly EphemeralEnvironmentTemplate[],
+) => Effect.Effect<ServerSettings, ServerSettingsError>;
+
+export class EphemeralEnvironmentTemplateSettings extends Context.Service<
+  EphemeralEnvironmentTemplateSettings,
+  UpdateEphemeralEnvironmentTemplates
+>()("t3/serverSettings/EphemeralEnvironmentTemplateSettings") {}
+
 export class ServerSettingsService extends Context.Service<
   ServerSettingsService,
   {
@@ -321,20 +341,28 @@ const makeTest = Effect.fn("serverSettings.makeTest")(function* (
       ),
     );
 
-  return {
+  const updateEphemeralEnvironmentTemplates: UpdateEphemeralEnvironmentTemplates = (update) =>
+    updateTestSettings((current) =>
+      Effect.succeed({
+        ...current,
+        ephemeralEnvironmentTemplates: update(current.ephemeralEnvironmentTemplates),
+      }),
+    );
+
+  return Context.make(ServerSettingsService, {
     managedPolicy,
     start: Effect.void,
     ready: Effect.void,
     getSettings,
     updateSettings: (patch) =>
       updateTestSettings((currentSettings) =>
-        Effect.succeed(applyServerSettingsPatch(currentSettings, patch)),
+        Effect.succeed(applyGenericSettingsPatch(currentSettings, patch)),
       ),
     updateProviderInstance: (mutation, patch = {}) =>
       updateTestSettings((currentSettings) =>
         Effect.gen(function* () {
           yield* ensureProviderInstanceMutationAllowed(currentSettings, mutation, "test settings");
-          const patched = applyServerSettingsPatch(currentSettings, patch);
+          const patched = applyGenericSettingsPatch(currentSettings, patch);
           return applyProviderInstanceMutation(patched, mutation);
         }),
       ),
@@ -342,14 +370,14 @@ const makeTest = Effect.fn("serverSettings.makeTest")(function* (
       writeSemaphore.withPermits(1)(getSettings.pipe(Effect.flatMap(use))),
     streamChanges: Stream.empty,
     subscribeChanges: Effect.succeed(Stream.empty),
-  } satisfies ServerSettingsService["Service"];
+  }).pipe(Context.add(EphemeralEnvironmentTemplateSettings, updateEphemeralEnvironmentTemplates));
 });
 
 /** Test settings; `managedPolicy` only tells consumers a policy applies, it does not lock values. */
 export const layerTest = (
   overrides: DeepPartial<ServerSettings> = {},
   managedPolicy?: ManagedPolicySummary,
-) => Layer.effect(ServerSettingsService, makeTest(overrides, managedPolicy));
+) => Layer.effectContext(makeTest(overrides, managedPolicy));
 
 // Accept retired token delivery only on load so one old value cannot reset all settings.
 const PersistedResponseStreamingMode = Schema.Union([
@@ -1409,7 +1437,15 @@ const make = Effect.gen(function* () {
     yield* Deferred.succeed(startedDeferred, undefined).pipe(Effect.orDie);
   });
 
-  return {
+  const updateEphemeralEnvironmentTemplates: UpdateEphemeralEnvironmentTemplates = (update) =>
+    updateAndPersistSettings({}, (current) =>
+      Effect.succeed({
+        ...current,
+        ephemeralEnvironmentTemplates: update(current.ephemeralEnvironmentTemplates),
+      }),
+    );
+
+  return Context.make(ServerSettingsService, {
     managedPolicy,
     start,
     ready: Deferred.await(startedDeferred),
@@ -1417,7 +1453,7 @@ const make = Effect.gen(function* () {
     updateSettings: (patch) =>
       updateAndPersistSettings(patch, (current) =>
         ensureSecretProviderWritesAllowed(patch, settingsPath).pipe(
-          Effect.as(applyServerSettingsPatch(current, patch)),
+          Effect.as(applyGenericSettingsPatch(current, patch)),
         ),
       ),
     updateProviderInstance: (mutation, patch = {}) =>
@@ -1425,7 +1461,7 @@ const make = Effect.gen(function* () {
         Effect.gen(function* () {
           yield* ensureSecretProviderWritesAllowed(patch, settingsPath);
           yield* ensureProviderInstanceMutationAllowed(current, mutation, settingsPath);
-          const patched = applyServerSettingsPatch(current, patch);
+          const patched = applyGenericSettingsPatch(current, patch);
           return applyProviderInstanceMutation(patched, mutation);
         }),
       ),
@@ -1438,7 +1474,7 @@ const make = Effect.gen(function* () {
         Effect.map((subscription) => materializeChanges(Stream.fromSubscription(subscription))),
       );
     },
-  } satisfies ServerSettingsService["Service"];
+  }).pipe(Context.add(EphemeralEnvironmentTemplateSettings, updateEphemeralEnvironmentTemplates));
 });
 
-export const layer = Layer.effect(ServerSettingsService, make);
+export const layer = Layer.effectContext(make);

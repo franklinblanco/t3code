@@ -74,6 +74,9 @@ describe("searchSettings", () => {
         scope: "environment-defaults",
       });
     }
+    for (const query of ["ephemeral", "on-demand"]) {
+      expect(searchSettings(query).map((item) => item.id)).toContain("load-balancing");
+    }
   });
 
   it("hides the Secrets page from nav and search while the secrets feature is disabled", () => {

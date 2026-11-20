@@ -55,6 +55,66 @@ it("drops theme defaults from a client's settings patch", () => {
   ).toEqual({ newWorktreesStartFromOrigin: false });
 });
 
+describe("ephemeral environment template settings", () => {
+  const template = {
+    id: "  worker  ",
+    label: "  Worker  ",
+    provisioner: { kind: "command", provisionCommand: "  provision-worker  " },
+  };
+
+  it("defaults legacy settings to no templates and discards templates from generic patches", () => {
+    expect(decodeServerSettings({}).ephemeralEnvironmentTemplates).toEqual([]);
+    const attemptedPatch = { defaultAutoPull: true, ephemeralEnvironmentTemplates: [template] };
+    expect(decodeServerSettingsPatch(attemptedPatch)).toEqual({ defaultAutoPull: true });
+    expect(decodeClientServerSettingsPatch(attemptedPatch)).toEqual({ defaultAutoPull: true });
+    expect(decodeServerSettingsPatch({ ephemeralEnvironmentTemplates: [] })).toEqual({});
+  });
+
+  it("persists trimmed templates with defaults and drops the unused settle switch", () => {
+    const settings = decodeServerSettings({
+      ephemeralEnvironmentTemplates: [{ ...template, teardownOnSettle: false }],
+    });
+    expect(settings.ephemeralEnvironmentTemplates).toEqual([
+      {
+        id: "worker",
+        label: "Worker",
+        enabled: true,
+        weight: 50,
+        provisioner: {
+          kind: "command",
+          provisionCommand: "provision-worker",
+          provisionTimeoutSeconds: 180,
+        },
+        idleTimeoutMinutes: 15,
+        maxConcurrentLeases: 1,
+        eligibleRepositoryKeys: [],
+      },
+    ]);
+    expect(
+      decodeServerSettings(encodeServerSettings(settings)).ephemeralEnvironmentTemplates,
+    ).toEqual(settings.ephemeralEnvironmentTemplates);
+  });
+
+  it.each([
+    { id: "   " },
+    { label: "A".repeat(81) },
+    { weight: -1 },
+    { weight: 101 },
+    { idleTimeoutMinutes: 0 },
+    { idleTimeoutMinutes: 1441 },
+    { maxConcurrentLeases: 1.5 },
+    { maxConcurrentLeases: 17 },
+    { eligibleRepositoryKeys: ["  "] },
+    { provisioner: { ...template.provisioner, provisionCommand: " " } },
+    { provisioner: { ...template.provisioner, provisionTimeoutSeconds: 9 } },
+    { provisioner: { ...template.provisioner, provisionTimeoutSeconds: 901 } },
+  ])("rejects invalid template fields %o", (overrides) => {
+    expect(() =>
+      decodeServerSettings({ ephemeralEnvironmentTemplates: [{ ...template, ...overrides }] }),
+    ).toThrow();
+  });
+});
+
 describe("storage cleanup settings", () => {
   it("keeps cleanup disabled for existing installations", () => {
     expect(decodeServerSettings({}).worktreeCleanup).toBeNull();

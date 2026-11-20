@@ -49,6 +49,7 @@ import {
 } from "../ChatView.logic";
 import { readPreparedConnection } from "../../state/session";
 import { recallComposerMessage } from "./composerPromptHistory";
+import { turnStartDisposition } from "./composerSend.logic";
 
 // Kept per route so a send in flight, and the multiple-model selections, survive
 // ChatView remounting while the user navigates.
@@ -82,6 +83,7 @@ export async function startFanoutThread(input: {
   readonly model: string;
   readonly uncertainSubmissions: Map<string, ThreadId>;
   readonly start: (threadId: ThreadId) => Promise<AtomCommandResult<unknown, unknown>>;
+  readonly onStartSettled?: (result: AtomCommandResult<unknown, unknown>) => void;
   readonly openThread: (threadId: ThreadId) => void;
 }): Promise<boolean> {
   const { retryKey, uncertainSubmissions } = input;
@@ -100,9 +102,14 @@ export async function startFanoutThread(input: {
     }
     requestMayHaveStarted = true;
     const result = await input.start(targetThreadId);
+    input.onStartSettled?.(result);
     if (result._tag === "Failure") {
       const error = squashAtomCommandFailure(result);
-      if (wasBootstrapThreadDeleted(error) || wasBootstrapThreadNotCreated(error)) {
+      if (
+        turnStartDisposition(result) === "rejected" ||
+        wasBootstrapThreadDeleted(error) ||
+        wasBootstrapThreadNotCreated(error)
+      ) {
         requestMayHaveStarted = false;
       }
       throw error;

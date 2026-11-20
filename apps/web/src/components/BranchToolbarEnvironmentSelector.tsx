@@ -55,7 +55,7 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
     availableEnvironments.find((env) => env.environmentId === environmentId) ?? null;
 
   const environmentItems = [
-    ...(onAutoEnvironment
+    ...(onAutoEnvironment || autoEnvironmentLabel
       ? [{ value: AUTO_VALUE, label: autoEnvironmentLabel ?? gt("Auto balance") }]
       : []),
     ...availableEnvironments.map((env) => ({
@@ -67,7 +67,12 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
 
   // Match the xs control's height and padding: the composer strip has no min-height,
   // and its glass seam assumes that height even when this label is the only control.
-  if (envLocked || (onEnvironmentChange === undefined && onAddToMachine === undefined)) {
+  if (
+    envLocked ||
+    (onEnvironmentChange === undefined &&
+      onAddToMachine === undefined &&
+      onAutoEnvironment === undefined)
+  ) {
     const lockedRow = (
       <span
         className="inline-flex h-7 min-w-0 max-w-full items-center gap-1.5 border border-transparent px-1.75 font-normal text-muted-foreground/70 text-sm sm:h-6 sm:text-xs"
@@ -77,13 +82,17 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
           kind={activeEnvironment?.machine ?? "server"}
           className="size-3 shrink-0"
         />
-        <ComposerContextLabel>{activeEnvironment?.label ?? gt("Run on")}</ComposerContextLabel>
+        <ComposerContextLabel>
+          {autoEnvironmentLabel ?? activeEnvironment?.label ?? gt("Run on")}
+        </ComposerContextLabel>
       </span>
     );
     return (
       <Tooltip>
         <TooltipTrigger render={lockedRow} />
-        <TooltipPopup>{activeEnvironment?.label ?? gt("Run on")}</TooltipPopup>
+        <TooltipPopup>
+          {autoEnvironmentLabel ?? activeEnvironment?.label ?? gt("Run on")}
+        </TooltipPopup>
       </Tooltip>
     );
   }
