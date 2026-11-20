@@ -3,6 +3,7 @@ import {
   type OrchestrationV2LinkOrigin,
   OrchestratorMcpEnvironmentTarget,
   OrchestratorMcpFailure,
+  type OrchestrationV2ThreadShell,
   type ProviderInteractionMode,
   type RuntimeMode,
   type ThreadId,
@@ -162,6 +163,37 @@ export const actsAsCaller = <P, A, E, R>(handle: (params: P) => Effect.Effect<A,
         Effect.andThen(writingCaller),
         Effect.flatMap(() => handle(params)),
       ),
+    undefined,
+  );
+
+export const colab = <P, A, E, R>(
+  handle: (params: P, thread: OrchestrationV2ThreadShell) => Effect.Effect<A, E, R>,
+) =>
+  declare(
+    (params: P) =>
+      Effect.gen(function* () {
+        yield* requireThreadCaller;
+        yield* refuseReadOnlyClient;
+        const caller = yield* readCaller();
+        if (caller.scope.client !== undefined || caller.caller === undefined) {
+          return yield* new OrchestratorMcpFailure({
+            code: "capability_denied",
+            message: "This credential cannot use Colab compute.",
+          });
+        }
+        yield* assertLiveCaller(caller);
+        yield* assertFullAccess(
+          caller,
+          "Colab compute requires a Full access thread in Default mode.",
+        );
+        if (caller.scope.colabAvailable !== true) {
+          return yield* new OrchestratorMcpFailure({
+            code: "capability_denied",
+            message: "Colab compute is unavailable for this request.",
+          });
+        }
+        return yield* handle(params, caller.caller);
+      }),
     undefined,
   );
 
@@ -417,6 +449,7 @@ const linksUnavailable = new OrchestratorMcpFailure({
 const THREAD_ONLY = new Set<unknown>([
   McpInvocationContext.hiddenFromOutsideClients,
   McpInvocationContext.hiddenWithoutBackgroundWait,
+  McpInvocationContext.colabToolEnabled,
 ]);
 
 /**

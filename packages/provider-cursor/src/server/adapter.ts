@@ -1089,6 +1089,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
           readonly agent: string;
           readonly orchestration: boolean;
           readonly device: boolean;
+          readonly colab: boolean;
           readonly backgroundWait: boolean;
           readonly runtime: string | undefined;
         } | null>(null);
@@ -2454,6 +2455,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
                   agent: context.run.agentId,
                   orchestration: false,
                   device: false,
+                  colab: false,
                   backgroundWait: false,
                   runtime: undefined,
                 });
@@ -2816,9 +2818,11 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
           turnInput: ProviderAdapter.ProviderAdapterV2TurnInput,
           mcpServers: Record<string, McpServerConfig> | undefined,
           hasDeviceTools: boolean,
+          hasColabTools: boolean,
           delivered: {
             readonly orchestration: boolean;
             readonly device: boolean;
+            readonly colab: boolean;
             readonly backgroundWait: boolean;
             readonly runtime: string | undefined;
           },
@@ -2840,8 +2844,10 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
             }),
             hasT3Mcp: mcpServers !== undefined,
             hasDeviceTools,
+            hasColabTools,
             orchestrationDelivered: delivered.orchestration,
             deviceInstructionsDelivered: delivered.device,
+            colabInstructionsDelivered: delivered.colab,
             providerInstructions: CURSOR_BACKGROUND_WAIT_INSTRUCTIONS,
             providerInstructionsDelivered: delivered.backgroundWait,
           });
@@ -2925,6 +2931,8 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
             const mcpServers = cursorMcpServers(mcpSession);
             const hasDeviceTools =
               mcpServers !== undefined && mcpSession?.capabilities?.has("device") === true;
+            const hasColabTools =
+              mcpServers !== undefined && mcpSession?.capabilities?.has("colab") === true;
             const known = yield* Ref.get(told);
             // A conversation this process has not sent to was told on its first run.
             const delivered =
@@ -2933,6 +2941,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
                 : {
                     orchestration: turnInput.nativeThreadHasTurns ?? turnInput.runOrdinal > 1,
                     device: false,
+                    colab: false,
                     backgroundWait: false,
                     runtime: undefined,
                   };
@@ -2982,6 +2991,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
                       turnInput,
                       mcpServers,
                       hasDeviceTools,
+                      hasColabTools,
                       delivered,
                       dropped?.text,
                     );
@@ -3027,6 +3037,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
                 agent: agent.nativeThreadId,
                 orchestration: !compacted && (delivered.orchestration || mcpServers !== undefined),
                 device: !compacted && hasDeviceTools,
+                colab: !compacted && hasColabTools,
                 backgroundWait:
                   !compacted && (delivered.backgroundWait || mcpServers !== undefined),
                 runtime: compacted ? undefined : delivered.runtime,
@@ -3538,6 +3549,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
                     agent,
                     orchestration: false,
                     device: false,
+                    colab: false,
                     backgroundWait: false,
                     runtime: undefined,
                   }),

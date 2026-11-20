@@ -60,3 +60,23 @@ To preserve those flags or enable queries with `query-term`, include them in
 `fish_features` in the environment that launches T3 Code. A shell export applies
 when you launch T3 Code from that shell; it does not configure a desktop app
 launched from the Dock or Finder. Enabling queries can restore the startup wait.
+
+## Google Colab compute
+
+On a macOS or Linux environment server with the Google Colab CLI installed and
+authenticated, a Full access thread in Default mode can move a build or test
+suite to a shared Colab VM while keeping edits in its local checkout. Ask the
+agent to run the command on Colab. CPU is the default, and Colab account
+entitlements determine whether high-RAM, GPU, and TPU runtimes are available.
+[Google Colab CLI setup](https://github.com/googlecolab/google-colab-cli)
+
+A job normally uploads the current worktree or project files. For Git
+workspaces, this includes tracked files and unignored local changes. Ask the
+agent to disable workspace sync for commands that need no local files, and
+name any output paths you want copied back into the checkout. Colab jobs start
+in a fresh directory, so include any dependency setup the command needs.
+
+Jobs can share a warm VM when it has capacity. The agent can check the pool's
+running and queued jobs and compute-unit balance, cancel your thread's jobs,
+or stop idle VMs. T3 Code stops idle VMs automatically after 10 minutes by
+default.

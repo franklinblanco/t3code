@@ -7,6 +7,7 @@ import {
   PI_T3_MCP_EXTENSION_FILENAME,
   PI_T3_MCP_EXTENSION_SOURCE,
   T3_MCP_BEARER_ENV,
+  T3_COLAB_TOOLS_ENV,
   T3_MCP_URL_ENV,
   T3_PI_RUNTIME_MODE_ENV,
   T3_PI_MCP_EXTENSION_PATH_ENV,
@@ -296,12 +297,16 @@ export function buildPiRpcLaunch(input: {
   // MCP credentials belong to this T3 session; discard inherited server/parent credentials.
   delete environment[T3_MCP_URL_ENV];
   delete environment[T3_MCP_BEARER_ENV];
+  delete environment[T3_COLAB_TOOLS_ENV];
   delete environment[T3_PI_MCP_EXTENSION_PATH_ENV];
 
   return {
     args,
     env: {
       ...environment,
+      ...(hasT3Mcp && input.mcpSession?.capabilities?.has("colab")
+        ? { [T3_COLAB_TOOLS_ENV]: "1" }
+        : {}),
       ...(hasT3Extension && input.extensionPath !== undefined
         ? { [T3_PI_MCP_EXTENSION_PATH_ENV]: input.extensionPath }
         : {}),

@@ -61,6 +61,7 @@ import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as CommandOutputHub from "./CommandOutputHub.ts";
+import { ColabComputePool } from "./ColabComputePool.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import {
   makeProviderFailure,
@@ -655,6 +656,7 @@ function layerTest(input: {
   readonly mcpConfigs?: Ref.Ref<
     ReadonlyArray<McpProviderSession.McpProviderSessionConfig | undefined>
   >;
+  readonly colabAvailability?: Effect.Effect<boolean>;
   readonly beforeOpen?: (input: {
     readonly providerSessionId: ProviderSessionId;
     readonly initialProviderItemIdentityVersion?: 2;
@@ -685,6 +687,7 @@ function layerTest(input: {
   readonly projectServiceLayer?: Layer.Layer<ProjectService.ProjectService>;
   readonly installationGateLayer?: Layer.Layer<ProviderInstallationGate.ProviderInstallationGate>;
 }) {
+  const colabAvailability = input.colabAvailability;
   const layerConfiguredEventSink =
     input.flakyReleaseWrites !== undefined
       ? layerFlakyReleaseEventSink(input.flakyReleaseWrites)
@@ -782,6 +785,9 @@ function layerTest(input: {
           input.installationGateLayer ?? ProviderInstallationGate.layer,
           ...(input.serverSettingsLayer === undefined ? [] : [input.serverSettingsLayer]),
           ...(input.projectServiceLayer === undefined ? [] : [input.projectServiceLayer]),
+          ...(colabAvailability === undefined
+            ? []
+            : [Layer.mock(ColabComputePool)({ isAvailable: () => colabAvailability })]),
         ),
       ),
     ),
@@ -3092,10 +3098,11 @@ it.effect("ProviderSessionManagerV2 duplicate detach preserves replacement MCP c
 );
 
 it.effect(
-  "ProviderSessionManagerV2 keeps a thread's MCP credential stable across detach and re-attach on a shared session",
+  "ProviderSessionManagerV2 keeps the MCP credential across re-attach and Colab availability changes",
   () =>
     Effect.gen(function* () {
       const state = yield* Ref.make(emptyState);
+      const colabAvailable = yield* Ref.make(false);
       const mcpConfigs = yield* Ref.make<
         ReadonlyArray<McpProviderSession.McpProviderSessionConfig | undefined>
       >([]);
@@ -3124,9 +3131,11 @@ it.effect(
 
         const original = (yield* Ref.get(mcpConfigs)).at(-1);
         assert.isDefined(original);
+        assert.isFalse(original?.capabilities?.has("colab") ?? false);
         const originalToken = original?.authorizationHeader.replace(/^Bearer\s+/, "");
         assert.isDefined(originalToken);
 
+        yield* Ref.set(colabAvailable, true);
         yield* manager.detach({ providerSessionId, threadId, detail: "Workspace changed." });
         assert.equal(
           (yield* registry.resolve(originalToken!))?.thread.threadId,
@@ -3140,11 +3149,13 @@ it.effect(
           modelSelection,
           runtimePolicy,
         });
+        const reattached = yield* mcpSessions.read(threadId);
         assert.equal(
-          (yield* mcpSessions.read(threadId))?.providerSessionId,
+          reattached?.providerSessionId,
           original?.providerSessionId,
           "re-attach must reuse the existing credential, not rotate it",
         );
+        assert.isTrue(reattached?.capabilities?.has("colab") ?? false);
         assert.equal((yield* registry.resolve(originalToken!))?.thread.threadId, threadId);
 
         yield* manager.close(providerSessionId);
@@ -3157,6 +3168,7 @@ it.effect(
             state,
             idleTimeoutMs: 1_000,
             mcpConfigs,
+            colabAvailability: Ref.get(colabAvailable),
           }),
         ),
       );
