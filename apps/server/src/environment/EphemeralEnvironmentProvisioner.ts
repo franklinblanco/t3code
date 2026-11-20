@@ -9,6 +9,7 @@ import {
   TrimmedNonEmptyString,
   type EphemeralEnvironmentLease,
   type EphemeralEnvironmentLeaseId,
+  type EphemeralEnvironmentProvisioner,
   type EphemeralEnvironmentTemplateId,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -24,6 +25,10 @@ import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 
 import * as ProcessRunner from "../processRunner.ts";
+import {
+  buildColabProvisionCommand,
+  buildColabTeardownCommand,
+} from "./ephemeralEnvironmentColab.ts";
 
 const AllocationHandle = Schema.Struct({ allocationHandle: TrimmedNonEmptyString });
 const ProvisionOutput = Schema.Struct({
@@ -118,6 +123,26 @@ export const makeCommands = Effect.gen(function* () {
   const runner = yield* ProcessRunner.ProcessRunner;
   const platform = yield* HostProcess.Platform;
 
+  const resolve = Effect.fn("EphemeralEnvironmentProvisioner.resolve")(function* (
+    provisioner: EphemeralEnvironmentProvisioner,
+  ) {
+    if (provisioner.kind === "command") {
+      return {
+        provisionCommand: provisioner.provisionCommand,
+        teardownCommand: provisioner.teardownCommand || null,
+      };
+    }
+    if (platform !== "darwin" && platform !== "linux") {
+      return yield* new EphemeralEnvironmentError({
+        message: "The Google Colab provider requires a macOS or Linux host.",
+      });
+    }
+    return {
+      provisionCommand: buildColabProvisionCommand(provisioner),
+      teardownCommand: buildColabTeardownCommand(),
+    };
+  });
+
   const run = Effect.fn("EphemeralEnvironmentProvisioner.run")(function* (
     input: CommandInput,
     extraEnv: Readonly<Record<string, string>>,
@@ -211,7 +236,7 @@ export const makeCommands = Effect.gen(function* () {
     }
   });
 
-  return { provision, teardown };
+  return { resolve, provision, teardown };
 });
 
 const makeProbe = Effect.gen(function* () {

@@ -9,6 +9,21 @@ import { EphemeralEnvironmentReleaseInput } from "./ephemeralEnvironment.ts";
 import { ORCHESTRATION_V2_WS_METHODS } from "./orchestrationV2.ts";
 import { WS_METHODS, WsRpcGroup } from "./rpc.ts";
 
+const upsertEphemeralTemplate = WsRpcGroup.requests.get(
+  WS_METHODS.ephemeralEnvironmentsUpsertTemplate,
+);
+if (upsertEphemeralTemplate?._tag !== WS_METHODS.ephemeralEnvironmentsUpsertTemplate) {
+  throw new Error("ephemeralEnvironments.upsertTemplate is missing");
+}
+const decodeEphemeralTemplateRequest = Schema.decodeUnknownSync(
+  upsertEphemeralTemplate.payloadSchema,
+);
+const encodeEphemeralTemplateRequest = Schema.encodeSync(upsertEphemeralTemplate.payloadSchema);
+const decodeEphemeralTemplateResponse = Schema.decodeUnknownSync(
+  upsertEphemeralTemplate.successSchema,
+);
+const encodeEphemeralTemplateResponse = Schema.encodeSync(upsertEphemeralTemplate.successSchema);
+
 describe("WebSocket RPC contracts", () => {
   it("only accepts asset and upload URLs on their own server routes", () => {
     const decodeAsset = Schema.decodeUnknownExit(AssetCreateUrlResult);
@@ -96,6 +111,36 @@ describe("WebSocket RPC contracts", () => {
   it("drops the unused force option from ephemeral release requests", () => {
     const decode = Schema.decodeUnknownSync(EphemeralEnvironmentReleaseInput);
     expect(decode({ leaseId: "lease-1", force: true })).toEqual({ leaseId: "lease-1" });
+  });
+
+  it.each([
+    {
+      kind: "command",
+      provisionCommand: "create-worker",
+      teardownCommand: "remove-worker",
+      provisionTimeoutSeconds: 180,
+    },
+    {
+      kind: "colab",
+      hardware: "gpu-l4",
+      syncLocalCredentials: false,
+      provisionTimeoutSeconds: 300,
+    },
+  ])("round-trips a $kind template across the upsert RPC", (provisioner) => {
+    const template = {
+      id: "worker",
+      label: "Worker",
+      enabled: true,
+      weight: 50,
+      provisioner,
+      idleTimeoutMinutes: 15,
+      maxConcurrentLeases: 1,
+      eligibleRepositoryKeys: [],
+    };
+    const request = decodeEphemeralTemplateRequest({ template });
+    const response = decodeEphemeralTemplateResponse(template);
+    expect(encodeEphemeralTemplateRequest(request)).toEqual({ template });
+    expect(encodeEphemeralTemplateResponse(response)).toEqual(template);
   });
 
   it("returns an ephemeral lease before the provisioner has connection details", () => {

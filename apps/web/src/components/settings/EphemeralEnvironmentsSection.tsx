@@ -6,9 +6,12 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import {
+  EphemeralEnvironmentColabHardwareSchema,
   type EnvironmentId,
+  type EphemeralEnvironmentColabHardware,
   type EphemeralEnvironmentLease,
   type EphemeralEnvironmentListResult,
+  type EphemeralEnvironmentProvisioner,
   type EphemeralEnvironmentTemplate,
   EphemeralEnvironmentTemplateId,
 } from "@t3tools/contracts";
@@ -58,6 +61,23 @@ const leaseStates = {
   failed: { label: msg("Failed"), variant: "error" },
 } as const;
 
+const colabHardwareLabels = {
+  "cpu-high-mem": msg("CPU (High-RAM)"),
+  cpu: msg("CPU (Standard)"),
+  "gpu-t4": msg("T4 GPU"),
+  "gpu-l4": msg("L4 GPU"),
+  "gpu-g4": msg("G4 GPU (96 GB)"),
+  "gpu-a100": msg("A100 GPU"),
+  "gpu-h100": msg("H100 GPU"),
+  "tpu-v5e1": msg("TPU v5e-1"),
+  "tpu-v6e1": msg("TPU v6e-1"),
+} satisfies Record<EphemeralEnvironmentColabHardware, ReturnType<typeof msg>>;
+
+const providerOptions = [
+  { value: "colab", label: msg("Google Colab") },
+  { value: "command", label: msg("Custom command") },
+] as const;
+
 function TemplateWeightSelect({
   weight,
   disabled,
@@ -105,22 +125,30 @@ function TemplateForm({
   onSave: (template: EphemeralEnvironmentTemplate) => Promise<void>;
 }) {
   const gt = useGT();
+  const m = useMessages();
   const formId = useId();
   const [weight, setWeight] = useState(template?.weight ?? 50);
+  const savedProvisioner = template?.provisioner;
+  const savedColab = savedProvisioner?.kind === "colab" ? savedProvisioner : undefined;
+  const savedCommand = savedProvisioner?.kind === "command" ? savedProvisioner : undefined;
+  const [kind, setKind] = useState<EphemeralEnvironmentProvisioner["kind"]>(
+    savedProvisioner?.kind ?? "colab",
+  );
+  const [hardware, setHardware] = useState<EphemeralEnvironmentColabHardware>(
+    savedColab?.hardware ?? "cpu-high-mem",
+  );
+  const [syncLocalCredentials, setSyncLocalCredentials] = useState(
+    savedColab?.syncLocalCredentials ?? true,
+  );
+  const [label, setLabel] = useState(template?.label ?? null);
+  const [provisionCommand, setProvisionCommand] = useState(savedCommand?.provisionCommand ?? "");
+  const [teardownCommand, setTeardownCommand] = useState(savedCommand?.teardownCommand ?? "");
+  const providers = providerOptions.map(({ value, label }) => ({ value, label: m(label) }));
+  const hardwareOptions = EphemeralEnvironmentColabHardwareSchema.literals.map((value) => ({
+    value,
+    label: m(colabHardwareLabels[value]),
+  }));
   const fields = [
-    { name: "label", label: gt("Label"), value: template?.label, maxLength: 80, required: true },
-    {
-      name: "provision",
-      label: gt("Provision command"),
-      value: template?.provisioner.provisionCommand,
-      required: true,
-      placeholder: "./provision-environment",
-    },
-    {
-      name: "teardown",
-      label: gt("Teardown command"),
-      value: template?.provisioner.teardownCommand ?? undefined,
-    },
     {
       name: "idle",
       label: gt("Idle timeout (minutes)"),
@@ -162,19 +190,26 @@ function TemplateForm({
             const data = new FormData(event.currentTarget);
             const read = (name: string) => String(data.get(name) ?? "").trim();
             const label = read("label");
-            const provisionCommand = read("provision");
-            if (!label || !provisionCommand) return;
+            if (!label || (kind === "command" && !provisionCommand.trim())) return;
             void onSave({
               id: template?.id ?? EphemeralEnvironmentTemplateId.make(randomUUID()),
               label,
               enabled: template?.enabled ?? true,
               weight,
-              provisioner: {
-                kind: "command",
-                provisionCommand,
-                teardownCommand: read("teardown") || null,
-                provisionTimeoutSeconds: template?.provisioner.provisionTimeoutSeconds ?? 180,
-              },
+              provisioner:
+                kind === "colab"
+                  ? {
+                      kind,
+                      hardware,
+                      syncLocalCredentials,
+                      provisionTimeoutSeconds: savedColab?.provisionTimeoutSeconds ?? 240,
+                    }
+                  : {
+                      kind,
+                      provisionCommand: provisionCommand.trim(),
+                      teardownCommand: teardownCommand.trim() || null,
+                      provisionTimeoutSeconds: savedCommand?.provisionTimeoutSeconds ?? 180,
+                    },
               idleTimeoutMinutes: Number(read("idle")),
               maxConcurrentLeases: Number(read("concurrency")),
               eligibleRepositoryKeys: [
@@ -188,16 +223,115 @@ function TemplateForm({
             });
           }}
         >
-          {fields.map(({ name, label, value, ...props }) => (
-            <label key={name} className="grid gap-1.5 text-sm">
-              {label}
-              <Input name={name} defaultValue={value} disabled={busy} {...props} />
-              {name === "provision" ? (
+          <div className="grid gap-1.5 text-sm">
+            <label htmlFor={`${formId}-provider`}>{gt("Provider")}</label>
+            <Select
+              items={providers}
+              value={kind}
+              disabled={busy}
+              onValueChange={(value) => {
+                if (value !== null) setKind(value);
+              }}
+            >
+              <SelectTrigger id={`${formId}-provider`}>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectPopup>
+                {providers.map(({ value, label }) => (
+                  <SelectItem key={value} value={value}>
+                    {label}
+                  </SelectItem>
+                ))}
+              </SelectPopup>
+            </Select>
+          </div>
+          <label className="grid gap-1.5 text-sm">
+            {gt("Label")}
+            <Input
+              name="label"
+              value={label ?? (kind === "colab" ? "Google Colab" : "")}
+              onChange={(event) => setLabel(event.target.value)}
+              maxLength={80}
+              required
+              disabled={busy}
+            />
+          </label>
+          {kind === "colab" ? (
+            <>
+              <div className="grid gap-1.5 text-sm">
+                <label htmlFor={`${formId}-hardware`}>{gt("Hardware")}</label>
+                <Select
+                  items={hardwareOptions}
+                  value={hardware}
+                  disabled={busy}
+                  onValueChange={(value) => {
+                    if (value !== null) setHardware(value);
+                  }}
+                >
+                  <SelectTrigger id={`${formId}-hardware`}>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectPopup>
+                    {hardwareOptions.map(({ value, label }) => (
+                      <SelectItem key={value} value={value}>
+                        {label}
+                      </SelectItem>
+                    ))}
+                  </SelectPopup>
+                </Select>
+              </div>
+              <div className="flex items-center justify-between gap-3 text-sm">
+                <div className="grid gap-1">
+                  <label id={`${formId}-credentials-label`} htmlFor={`${formId}-credentials`}>
+                    {gt("Sync local credentials")}
+                  </label>
+                  <p
+                    id={`${formId}-credentials-description`}
+                    className="text-xs text-muted-foreground"
+                  >
+                    <T>Forward Codex, Claude Code, GitHub, and Git credentials over SSH.</T>
+                  </p>
+                </div>
+                <Switch
+                  id={`${formId}-credentials`}
+                  aria-labelledby={`${formId}-credentials-label`}
+                  aria-describedby={`${formId}-credentials-description`}
+                  checked={syncLocalCredentials}
+                  disabled={busy}
+                  onCheckedChange={setSyncLocalCredentials}
+                />
+              </div>
+            </>
+          ) : (
+            <>
+              <label className="grid gap-1.5 text-sm">
+                {gt("Provision command")}
+                <Input
+                  value={provisionCommand}
+                  onChange={(event) => setProvisionCommand(event.target.value)}
+                  placeholder="./provision-environment"
+                  required
+                  disabled={busy}
+                />
                 <span className="text-xs text-muted-foreground">
                   <T>Write one JSON object to stdout with these fields.</T>{" "}
                   <code>{"{ httpUrl, wsUrl, allocationHandle }"}</code>
                 </span>
-              ) : null}
+              </label>
+              <label className="grid gap-1.5 text-sm">
+                {gt("Teardown command")}
+                <Input
+                  value={teardownCommand}
+                  onChange={(event) => setTeardownCommand(event.target.value)}
+                  disabled={busy}
+                />
+              </label>
+            </>
+          )}
+          {fields.map(({ name, label, value, ...props }) => (
+            <label key={name} className="grid gap-1.5 text-sm">
+              {label}
+              <Input name={name} defaultValue={value} disabled={busy} {...props} />
             </label>
           ))}
           <div className="flex items-center justify-between gap-3 text-sm">
@@ -306,6 +440,14 @@ export function EphemeralEnvironmentsSection({
   return (
     <div className="grid gap-3 border-t px-3 py-3 sm:px-4">
       {data.templates.map((template) => {
+        const { provisioner } = template;
+        const providerSummary =
+          provisioner.kind === "colab"
+            ? gt("{provider} · {hardware}", {
+                provider: m(providerOptions[0].label),
+                hardware: m(colabHardwareLabels[provisioner.hardware]),
+              })
+            : m(providerOptions[1].label);
         const leases = data.leases.filter((lease) => lease.templateId === template.id);
         const active = leases.filter(isActiveLease);
         const latest = leases.reduce<EphemeralEnvironmentLease | null>(
@@ -326,6 +468,7 @@ export function EphemeralEnvironmentsSection({
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="min-w-0">
                 <div className="break-words text-sm font-medium">{template.label}</div>
+                <div className="text-xs text-muted-foreground">{providerSummary}</div>
                 <div className="text-xs text-muted-foreground">
                   {gt("Idle timeout: {minutes} min · Lease limit: {limit}", {
                     minutes: template.idleTimeoutMinutes,

@@ -72,7 +72,10 @@ describe("ephemeral environment template settings", () => {
 
   it("persists trimmed templates with defaults and drops the unused settle switch", () => {
     const settings = decodeServerSettings({
-      ephemeralEnvironmentTemplates: [{ ...template, teardownOnSettle: false }],
+      ephemeralEnvironmentTemplates: [
+        { ...template, teardownOnSettle: false },
+        { ...template, id: "colab", label: "Google Colab", provisioner: { kind: "colab" } },
+      ],
     });
     expect(settings.ephemeralEnvironmentTemplates).toEqual([
       {
@@ -84,6 +87,21 @@ describe("ephemeral environment template settings", () => {
           kind: "command",
           provisionCommand: "provision-worker",
           provisionTimeoutSeconds: 180,
+        },
+        idleTimeoutMinutes: 15,
+        maxConcurrentLeases: 1,
+        eligibleRepositoryKeys: [],
+      },
+      {
+        id: "colab",
+        label: "Google Colab",
+        enabled: true,
+        weight: 50,
+        provisioner: {
+          kind: "colab",
+          hardware: "cpu-high-mem",
+          syncLocalCredentials: true,
+          provisionTimeoutSeconds: 240,
         },
         idleTimeoutMinutes: 15,
         maxConcurrentLeases: 1,
@@ -108,6 +126,10 @@ describe("ephemeral environment template settings", () => {
     { provisioner: { ...template.provisioner, provisionCommand: " " } },
     { provisioner: { ...template.provisioner, provisionTimeoutSeconds: 9 } },
     { provisioner: { ...template.provisioner, provisionTimeoutSeconds: 901 } },
+    { provisioner: { kind: "colab", hardware: "gpu-unknown" } },
+    { provisioner: { kind: "colab", syncLocalCredentials: "false" } },
+    { provisioner: { kind: "colab", provisionTimeoutSeconds: 29 } },
+    { provisioner: { kind: "colab", provisionTimeoutSeconds: 901 } },
   ])("rejects invalid template fields %o", (overrides) => {
     expect(() =>
       decodeServerSettings({ ephemeralEnvironmentTemplates: [{ ...template, ...overrides }] }),

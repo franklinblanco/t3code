@@ -311,12 +311,13 @@ const make = Effect.gen(function* () {
 
   const provisionLease = Effect.fn("EphemeralEnvironmentManager.provisionLease")(function* (
     reservation: LeaseRow,
-    template: EphemeralEnvironmentTemplate,
+    provisionCommand: string,
+    timeoutSeconds: number,
   ) {
     const result = yield* commands.provision({
-      command: template.provisioner.provisionCommand,
-      timeoutSeconds: template.provisioner.provisionTimeoutSeconds,
-      templateId: template.id,
+      command: provisionCommand,
+      timeoutSeconds,
+      templateId: reservation.template_id,
       leaseId: reservation.lease_id,
       repositoryKey: reservation.repository_key ?? undefined,
     });
@@ -420,7 +421,8 @@ const make = Effect.gen(function* () {
       yield* random.uuidV4().pipe(Effect.mapError(leaseStorageError)),
     );
     const createdAt = yield* now;
-    const teardownCommand = template.provisioner.teardownCommand || null;
+    const { provisionCommand, teardownCommand } = yield* commands.resolve(template.provisioner);
+    const timeoutSeconds = template.provisioner.provisionTimeoutSeconds;
     const reservation: LeaseRow = {
       lease_id: leaseId,
       template_id: template.id,
@@ -440,13 +442,17 @@ const make = Effect.gen(function* () {
       idle_deadline_at: null,
       idle_timeout_minutes: template.idleTimeoutMinutes,
       teardown_command: teardownCommand,
-      teardown_timeout_seconds: template.provisioner.provisionTimeoutSeconds,
+      teardown_timeout_seconds: timeoutSeconds,
       teardown_pending: teardownCommand === null ? 0 : 1,
     };
     yield* sql`INSERT INTO ephemeral_environment_leases ${sql.insert({ ...reservation })}`.pipe(
       Effect.mapError(leaseStorageError),
     );
-    const job = yield* startJob(provisions, leaseId, provisionLease(reservation, template));
+    const job = yield* startJob(
+      provisions,
+      leaseId,
+      provisionLease(reservation, provisionCommand, timeoutSeconds),
+    );
     return { lease: Fiber.join(job), reused: false };
   }, serialize);
 

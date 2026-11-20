@@ -206,8 +206,32 @@ Leave the repository filter empty to allow any project. A **Manual only** templa
 can still be started from Settings. **Start** connects the new worker so you can
 select it for a thread.
 
-The primary host runs the provision command. A hosted web client without a
-primary host uses its first enabled permanent environment. The command's stdout
+When the idle timeout elapses, T3 Code checks the worker for active turns and
+background work. If the worker is busy or T3 Code cannot verify its activity,
+it extends the timeout and checks again later.
+
+#### Google Colab
+
+Choose **Google Colab** as the provider and select a **Hardware** preset.
+**CPU (High-RAM)** is selected by default. The Colab account determines which
+hardware is available and supplies any compute units the worker uses.
+
+Install the Colab CLI with `uv tool install google-colab-cli` on the macOS or
+Linux host running T3 Code. Sign in and confirm that `colab sessions` works.
+T3 Code creates the runtime, installs T3 Code Nightly, Codex, Claude Code, and
+GitHub CLI, and connects through a loopback SSH tunnel. Use the desktop app or
+a browser on that host to reach the tunnel. Releasing the lease stops the
+runtime and closes the tunnel.
+
+**Sync local credentials** is on by default. T3 Code forwards available Codex,
+Claude Code, GitHub, and Git credentials from the host over SSH. Turn the switch
+off to start the worker without forwarding those credentials.
+
+#### Custom command
+
+Choose **Custom command** to supply your own provision and teardown commands.
+The primary host runs both commands. A hosted web client without a primary
+host uses its first enabled permanent environment. The provision command's stdout
 must contain one JSON object with `httpUrl`, `wsUrl`, and `allocationHandle`. The URLs must be reachable
 from the client. Include `bearerToken` or `pairingToken` for client authentication.
 You can also include `workspaceRoot` for a checkout prepared on the new machine.
@@ -216,27 +240,8 @@ worker uses its own Git credentials.
 
 The teardown command receives `T3_EPHEMERAL_ALLOCATION_HANDLE`,
 `T3_EPHEMERAL_LEASE_ID`, and `T3_EPHEMERAL_TEMPLATE_ID`. Use the allocation handle
-to stop the specific machine when the lease is released. When the idle timeout
-elapses, T3 Code checks the worker for active turns and background work. If the
-worker is busy or T3 Code cannot verify its activity, it extends the timeout and
-checks again later. Automatic release needs a bearer token with permission to
-read the worker’s activity.
-
-For example, a provision script on a host with the Colab CLI installed and signed
-in could create an L4 runtime, then call your bootstrap script over SSH. The
-bootstrap script starts T3 Code, exposes its endpoints, and prints the JSON
-response. Use the session name as `allocationHandle`.
-
-```sh
-session="t3-overflow-$T3_EPHEMERAL_LEASE_ID"
-colab new -s "$session" --gpu L4 >&2 || exit 1
-if ! colab ssh -s "$session" -- /content/start-t3-overflow "$session"; then
-  colab stop -s "$session" >&2
-  exit 1
-fi
-```
-
-Set the teardown command to `colab stop -s "$T3_EPHEMERAL_ALLOCATION_HANDLE"`.
+to stop the specific machine when the lease is released. Automatic release
+needs a bearer token with permission to read the worker’s activity.
 
 ### Tailscale HTTPS
 

@@ -74,7 +74,7 @@ describe("searchSettings", () => {
         scope: "environment-defaults",
       });
     }
-    for (const query of ["ephemeral", "on-demand"]) {
+    for (const query of ["ephemeral", "on-demand", "colab", "google colab"]) {
       expect(searchSettings(query).map((item) => item.id)).toContain("load-balancing");
     }
   });

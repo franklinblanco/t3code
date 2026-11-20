@@ -1430,7 +1430,7 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/connections",
     searchTerms: [
       msg(
-        "automatic machine environment resources cpu memory capacity preference weight shared projects ephemeral on-demand overflow",
+        "automatic machine environment resources cpu memory capacity preference weight shared projects ephemeral on-demand overflow colab google colab",
       ),
     ],
   },

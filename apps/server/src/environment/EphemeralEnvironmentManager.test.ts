@@ -8,9 +8,12 @@ import {
   EphemeralEnvironmentError,
   EphemeralEnvironmentLeaseId,
   EphemeralEnvironmentTemplateId,
+  type EphemeralEnvironmentProvisionerColab,
+  type EphemeralEnvironmentProvisionerCommand,
   type EphemeralEnvironmentTemplate,
 } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -28,20 +31,29 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as Manager from "./EphemeralEnvironmentManager.ts";
 import * as Provisioner from "./EphemeralEnvironmentProvisioner.ts";
 
+const commandProvisioner: EphemeralEnvironmentProvisionerCommand = {
+  kind: "command",
+  provisionCommand: "create-sandbox",
+  teardownCommand: "remove-sandbox",
+  provisionTimeoutSeconds: 10,
+};
+
 const template: EphemeralEnvironmentTemplate = {
   id: EphemeralEnvironmentTemplateId.make("sandbox"),
   label: "Sandbox",
   enabled: true,
   weight: 50,
-  provisioner: {
-    kind: "command",
-    provisionCommand: "create-sandbox",
-    teardownCommand: "remove-sandbox",
-    provisionTimeoutSeconds: 10,
-  },
+  provisioner: commandProvisioner,
   idleTimeoutMinutes: 1,
   maxConcurrentLeases: 1,
   eligibleRepositoryKeys: ["example/repo"],
+};
+
+const colabProvisioner: EphemeralEnvironmentProvisionerColab = {
+  kind: "colab",
+  hardware: "cpu-high-mem",
+  syncLocalCredentials: true,
+  provisionTimeoutSeconds: 240,
 };
 
 const callerId = AuthSessionId.make("owner-session");
@@ -137,6 +149,106 @@ describe("EphemeralEnvironmentManager", () => {
         ).pipe(Layer.provideMerge(Sqlite.layerMemory)),
       ),
     ),
+  );
+
+  it.effect.each([
+    { hardware: "cpu-high-mem", flags: "--high-mem", syncLocalCredentials: true },
+    { hardware: "gpu-l4", flags: "--gpu L4", syncLocalCredentials: false },
+  ] as const)(
+    "provisions Colab with $hardware and retains teardown across a restart",
+    ({ hardware, flags, syncLocalCredentials }) =>
+      Effect.gen(function* () {
+        const calls: ProcessRunner.ProcessRunInput[] = [];
+        const managerLayer = layerManager((input) =>
+          Effect.sync(() => {
+            calls.push(input);
+            return input.env?.T3_EPHEMERAL_ALLOCATION_HANDLE === undefined
+              ? output(JSON.stringify({ ...allocation, allocationHandle: "t3-session" }))
+              : output();
+          }),
+        );
+        const { lease, teardownCommand } = yield* Effect.gen(function* () {
+          const manager = yield* Manager.EphemeralEnvironmentManager;
+          const sql = yield* SqlClient.SqlClient;
+          yield* manager.upsertTemplate({
+            template: {
+              ...template,
+              provisioner: { ...colabProvisioner, hardware, syncLocalCredentials },
+            },
+          });
+          const { lease } = yield* manager.acquire(request, callerId);
+          assert.strictEqual(lease.state, "ready");
+          assert.strictEqual(lease.bearerToken, allocation.bearerToken);
+          const [provision] = calls;
+          assert.isDefined(provision);
+          const script = provision.args[1] ?? "";
+          assert.strictEqual(script.split("\n")[0], `exec bash -s -- ${flags} <<'T3_COLAB'`);
+          assert.deepStrictEqual(provision.timeout, Duration.seconds(240));
+          for (const credential of [
+            "gh auth login --with-token",
+            "Claude Code-credentials",
+            ".claude/.credentials.json",
+            ".codex/auth.json",
+            ".gitconfig",
+          ]) {
+            assert.strictEqual(script.includes(credential), syncLocalCredentials);
+          }
+          yield* manager.upsertTemplate({ template });
+          const [row] = yield* sql<{ teardown_command: string }>`
+            SELECT teardown_command FROM ephemeral_environment_leases WHERE lease_id = ${lease.leaseId}
+          `;
+          return { lease, teardownCommand: row?.teardown_command };
+        }).pipe(Effect.provide(managerLayer));
+
+        yield* Effect.gen(function* () {
+          const manager = yield* Manager.EphemeralEnvironmentManager;
+          assert.deepStrictEqual((yield* manager.list).templates, []);
+          const released = yield* manager.release({ leaseId: lease.leaseId });
+          assert.strictEqual(released.lease.state, "released");
+        }).pipe(Effect.provide(managerLayer));
+
+        assert.lengthOf(calls, 2);
+        const teardown = calls[1];
+        assert.strictEqual(teardown?.args[1], teardownCommand);
+        assert.include(teardown?.args[1] ?? "", 'stop -s "$handle"');
+        assert.strictEqual(teardown?.env?.T3_EPHEMERAL_ALLOCATION_HANDLE, lease.allocationHandle);
+      }).pipe(Effect.provide(Sqlite.layerMemory)),
+  );
+
+  it.effect(
+    "cleans up a failed Colab provision using the lease ID when no handle was emitted",
+    () =>
+      Effect.gen(function* () {
+        const calls: ProcessRunner.ProcessRunInput[] = [];
+        yield* Effect.gen(function* () {
+          const manager = yield* Manager.EphemeralEnvironmentManager;
+          yield* manager.upsertTemplate({
+            template: { ...template, provisioner: colabProvisioner },
+          });
+          const failure = yield* Effect.flip(manager.acquire(request, callerId));
+          assert.include(failure.message, "timed out");
+          const [lease] = (yield* manager.list).leases;
+          assert.strictEqual(lease?.state, "failed");
+          assert.strictEqual(lease?.allocationHandle, null);
+          assert.lengthOf(calls, 2);
+          const teardown = calls[1];
+          assert.strictEqual(teardown?.env?.T3_EPHEMERAL_LEASE_ID, lease?.leaseId);
+          assert.strictEqual(teardown?.env?.T3_EPHEMERAL_ALLOCATION_HANDLE, "");
+          assert.include(teardown?.args[1] ?? "", 'session_for_lease "$T3_EPHEMERAL_LEASE_ID"');
+          yield* manager.deleteTemplate({ templateId: template.id });
+        }).pipe(
+          Effect.provide(
+            layerManager((input) =>
+              Effect.sync(() => {
+                calls.push(input);
+                return input.env?.T3_EPHEMERAL_ALLOCATION_HANDLE === undefined
+                  ? { ...output(), timedOut: true }
+                  : output();
+              }),
+            ),
+          ),
+        );
+      }).pipe(Effect.provide(Sqlite.layerMemory)),
   );
 
   it.effect(
@@ -356,7 +468,7 @@ describe("EphemeralEnvironmentManager", () => {
         yield* manager.upsertTemplate({
           template: {
             ...template,
-            provisioner: { ...template.provisioner, teardownCommand: "new-cleanup" },
+            provisioner: { ...commandProvisioner, teardownCommand: "new-cleanup" },
           },
         });
         yield* TestClock.adjust("30 seconds");

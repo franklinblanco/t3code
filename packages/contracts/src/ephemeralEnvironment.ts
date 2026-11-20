@@ -18,6 +18,32 @@ export const EphemeralEnvironmentLeaseId = TrimmedNonEmptyString.pipe(
 );
 export type EphemeralEnvironmentLeaseId = typeof EphemeralEnvironmentLeaseId.Type;
 
+export const EphemeralEnvironmentColabHardwareSchema = Schema.Literals([
+  "cpu-high-mem",
+  "cpu",
+  "gpu-t4",
+  "gpu-l4",
+  "gpu-g4",
+  "gpu-a100",
+  "gpu-h100",
+  "tpu-v5e1",
+  "tpu-v6e1",
+]);
+export type EphemeralEnvironmentColabHardware = typeof EphemeralEnvironmentColabHardwareSchema.Type;
+
+export const EphemeralEnvironmentProvisionerColabSchema = Schema.Struct({
+  kind: Schema.Literal("colab"),
+  hardware: EphemeralEnvironmentColabHardwareSchema.pipe(
+    Schema.withDecodingDefault(Effect.succeed("cpu-high-mem" as const)),
+  ),
+  syncLocalCredentials: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  provisionTimeoutSeconds: Schema.Int.check(Schema.isBetween({ minimum: 30, maximum: 900 })).pipe(
+    Schema.withDecodingDefault(Effect.succeed(240)),
+  ),
+});
+export type EphemeralEnvironmentProvisionerColab =
+  typeof EphemeralEnvironmentProvisionerColabSchema.Type;
+
 export const EphemeralEnvironmentProvisionerCommandSchema = Schema.Struct({
   kind: Schema.Literal("command"),
   /** Runs on the controller host. Stdout is JSON with httpUrl, wsUrl, allocationHandle,
@@ -32,6 +58,12 @@ export const EphemeralEnvironmentProvisionerCommandSchema = Schema.Struct({
 export type EphemeralEnvironmentProvisionerCommand =
   typeof EphemeralEnvironmentProvisionerCommandSchema.Type;
 
+export const EphemeralEnvironmentProvisionerSchema = Schema.Union([
+  EphemeralEnvironmentProvisionerColabSchema,
+  EphemeralEnvironmentProvisionerCommandSchema,
+]);
+export type EphemeralEnvironmentProvisioner = typeof EphemeralEnvironmentProvisionerSchema.Type;
+
 export const EphemeralEnvironmentTemplateSchema = Schema.Struct({
   id: EphemeralEnvironmentTemplateId,
   label: TrimmedNonEmptyString.check(Schema.isMaxLength(80)),
@@ -40,7 +72,7 @@ export const EphemeralEnvironmentTemplateSchema = Schema.Struct({
   weight: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 100 })).pipe(
     Schema.withDecodingDefault(Effect.succeed(50)),
   ),
-  provisioner: EphemeralEnvironmentProvisionerCommandSchema,
+  provisioner: EphemeralEnvironmentProvisionerSchema,
   idleTimeoutMinutes: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 1440 })).pipe(
     Schema.withDecodingDefault(Effect.succeed(15)),
   ),
