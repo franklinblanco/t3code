@@ -52,8 +52,10 @@ import { ProviderWorkspaceMissingError } from "../provider/Errors.ts";
 import * as ProviderInstallationGate from "../provider/ProviderInstallationGate.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import type { McpProviderSessionConfig } from "@t3tools/provider-core/server/mcpSession";
 import * as ServerSettings from "../serverSettings.ts";
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
+import * as ColabComputePool from "./ColabComputePool.ts";
 import * as EventSink from "./EventSink.ts";
 import * as CommandOutputHub from "./CommandOutputHub.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
@@ -440,6 +442,7 @@ export const layerWithOptions = (
       const fileSystem = yield* FileSystem.FileSystem;
       const mcpSessionRegistry = yield* McpSessionRegistry.McpSessionRegistry;
       const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
+      const colab = yield* Effect.serviceOption(ColabComputePool.ColabComputePool);
       /** Unreadable settings must preserve explicit browser-access opt-outs. */
       const serverSettings = yield* Effect.serviceOption(ServerSettings.ServerSettingsService);
       const projectService = yield* Effect.serviceOption(ProjectService.ProjectService);
@@ -562,6 +565,13 @@ export const layerWithOptions = (
       const isMcpCredentialReserved = (threadId: ThreadId, mcpCredentialId: string) =>
         (mcpCredentialReservations.get(mcpReservationKey(threadId, mcpCredentialId)) ?? 0) > 0;
       const mcpPrepareLock = yield* KeyedLock.make<ThreadId>();
+      const withColabToolHint = (config: McpProviderSessionConfig, available: boolean) => {
+        if ((config.capabilities?.has("colab") === true) === available) return config;
+        const capabilities = new Set(config.capabilities);
+        if (available) capabilities.add("colab");
+        else capabilities.delete("colab");
+        return { ...config, capabilities };
+      };
       /** Serialize prepares per thread so concurrent rotations cannot revoke each other's credentials. */
       const prepareMcpSession = (
         threadId: ThreadId,
@@ -590,25 +600,33 @@ export const layerWithOptions = (
                 if (Option.getOrElse(backgroundWait, () => false)) {
                   capabilities.add("background-wait");
                 }
-                const subagent = yield* projectionStore.getThread(threadId).pipe(
-                  Effect.map((thread) => thread.lineage.relationshipToParent === "subagent"),
-                  Effect.orElseSucceed(() => false),
+                const thread = yield* projectionStore.getThread(threadId).pipe(Effect.option);
+                const subagent = Option.exists(
+                  thread,
+                  (thread) => thread.lineage.relationshipToParent === "subagent",
                 );
+                // Adapters use this for instructions. MCP checks availability on each request.
+                const colabToolsAvailable =
+                  Option.isSome(colab) &&
+                  Option.exists(
+                    thread,
+                    (thread) =>
+                      thread.runtimeMode === "full-access" && thread.interactionMode === "default",
+                  ) &&
+                  (yield* colab.value.isAvailable());
                 const existing = yield* mcpSessions.read(threadId);
                 if (existing !== undefined) {
                   // Reserve before async validation so release cannot revoke between validation and reservation.
                   reserveMcpCredential(threadId, existing.providerSessionId);
+                  const dropReservation = () =>
+                    Effect.sync(() =>
+                      dropMcpCredentialReservation(threadId, existing.providerSessionId),
+                    );
                   const rawToken = existing.authorizationHeader.replace(/^Bearer\s+/, "");
                   // Interrupted resolution must release the reservation before the caller learns of it.
                   const resolved = yield* mcpSessionRegistry
                     .resolve(rawToken)
-                    .pipe(
-                      Effect.onInterrupt(() =>
-                        Effect.sync(() =>
-                          dropMcpCredentialReservation(threadId, existing.providerSessionId),
-                        ),
-                      ),
-                    );
+                    .pipe(Effect.onInterrupt(dropReservation));
                   if (
                     resolved !== undefined &&
                     resolved.thread.threadId === threadId &&
@@ -621,6 +639,9 @@ export const layerWithOptions = (
                     // A credential issued while the lineage read failed is replaced once it works.
                     (resolved.thread.subagent === true) === subagent
                   ) {
+                    const config = withColabToolHint(existing, colabToolsAvailable);
+                    if (config !== existing)
+                      yield* mcpSessions.set(config).pipe(Effect.onInterrupt(dropReservation));
                     return { mcpCredentialId: existing.providerSessionId, issued: false };
                   }
                   dropMcpCredentialReservation(threadId, existing.providerSessionId);
@@ -634,7 +655,7 @@ export const layerWithOptions = (
                   subagent,
                 });
                 yield* mcpSessions.set({
-                  ...credential.config,
+                  ...withColabToolHint(credential.config, colabToolsAvailable),
                   hasPendingWake: projectionStore
                     .getThreadRecords(threadId, ["runs", "subagents"])
                     .pipe(

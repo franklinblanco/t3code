@@ -159,6 +159,8 @@ export interface McpInvocationScope {
   readonly origin?: string | undefined;
   /** False when the calling thread's project is on no forge T3 reads; `/mcp` reads it per request. */
   readonly forge?: boolean;
+  /** Set per request when the CLI is present and the calling thread can use it. */
+  readonly colabAvailable?: boolean;
 }
 
 /**
@@ -202,6 +204,12 @@ export const hiddenFromOutsideClients = (): boolean => {
   const fiber = Fiber.getCurrent();
   const scope = fiber && Context.getOrUndefined(fiber.context, McpInvocationContext);
   return scope === undefined || scope.thread !== undefined;
+};
+
+export const colabToolEnabled = (): boolean => {
+  const fiber = Fiber.getCurrent();
+  const scope = fiber && Context.getOrUndefined(fiber.context, McpInvocationContext);
+  return scope?.thread !== undefined && scope.client === undefined && scope.colabAvailable === true;
 };
 
 /** `hiddenFromOutsideClients`, and hidden from a thread whose provider cannot hold for background work. */

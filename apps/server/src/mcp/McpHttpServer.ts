@@ -37,6 +37,7 @@ import * as HtmlRender from "../htmlRender/HtmlRender.ts";
 import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import { ColabComputePool } from "../orchestration-v2/ColabComputePool.ts";
 import * as PullRequestService from "../pullRequest/PullRequestService.ts";
 import * as PullRequestWatchService from "../pullRequest/PullRequestWatchService.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
@@ -92,6 +93,8 @@ import {
   DeviceScreenshotToolkit,
   DeviceStandardToolkit,
 } from "./toolkits/device/tools.ts";
+import { ColabToolkit } from "./toolkits/colab/tools.ts";
+import * as ColabHandlers from "./toolkits/colab/handlers.ts";
 import * as HtmlHandlers from "./toolkits/html/handlers.ts";
 import { MessageToolkit } from "./toolkits/message/tools.ts";
 import * as MessageHandlers from "./toolkits/message/handlers.ts";
@@ -284,6 +287,7 @@ const makeMcpAuthMiddleware = Effect.gen(function* () {
   );
   const pullRequests = yield* Effect.serviceOption(PullRequestService.PullRequestService);
   const projections = yield* Effect.serviceOption(ProjectionStore.ProjectionStoreV2);
+  const colab = yield* Effect.serviceOption(ColabComputePool);
   // Every request reads it, and a remote added mid-thread shows the tools within a minute.
   const forgeOfThread = yield* Cache.make({
     capacity: 1_000,
@@ -337,7 +341,25 @@ const makeMcpAuthMiddleware = Effect.gen(function* () {
       limited.thread === undefined
         ? undefined
         : yield* Cache.get(forgeOfThread, limited.thread.threadId);
-    return { ...limited, linkedEnvironments, origin, ...(forge === undefined ? {} : { forge }) };
+    const colabAvailable =
+      limited.thread !== undefined &&
+      limited.client === undefined &&
+      Option.isSome(colab) &&
+      Option.isSome(projections) &&
+      (yield* colab.value.isAvailable()) &&
+      (yield* projections.value.getThreadShell(limited.thread.threadId).pipe(
+        Effect.map(
+          (thread) => thread?.runtimeMode === "full-access" && thread.interactionMode === "default",
+        ),
+        Effect.orElseSucceed(() => false),
+      ));
+    return {
+      ...limited,
+      linkedEnvironments,
+      origin,
+      ...(forge === undefined ? {} : { forge }),
+      colabAvailable,
+    };
   });
   // Untraced: a span here would wrap the tool call; the HTTP server span already covers it.
   return Effect.fnUntraced(function* (httpEffect) {
@@ -1382,6 +1404,8 @@ export const layerDeviceToolkit = Layer.mergeAll(
   layerDeviceScreenshotRegistration,
 );
 
+export const layerColabToolkit = toolkitRegistration(ColabToolkit, ColabHandlers.layer);
+
 /**
  * `McpServer` for in-process calls, which provide `McpInvocationContext`
  * around `callTool` as the auth middleware does for each /mcp request.
@@ -1425,6 +1449,7 @@ export const layerTools = Layer.mergeAll(
   layerPullRequestsToolkit,
   layerIssuesToolkit,
   layerDeviceToolkit,
+  layerColabToolkit,
   layerHtmlToolkit,
   layerMessageToolkit,
 );
@@ -1435,7 +1460,12 @@ const layerToolExposure = Layer.effect(
     const server = yield* McpServer.McpServer;
     return McpToolExposure.make(
       () =>
-        server.tools.map(({ tool }) => ({ name: tool.name, description: tool.description ?? "" })),
+        server.tools
+          .filter(
+            ({ tool }) =>
+              !tool.name.startsWith("colab_") || McpInvocationContext.colabToolEnabled(),
+          )
+          .map(({ tool }) => ({ name: tool.name, description: tool.description ?? "" })),
       () => server.notifications["notifications/tools/list_changed"]({}),
     );
   }),
