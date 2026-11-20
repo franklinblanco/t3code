@@ -5,7 +5,9 @@ export async function waitForAtomValue<A>(input: {
   readonly atom: Atom.Atom<A>;
   readonly predicate: (value: A) => boolean;
   readonly timeoutMs: number;
+  readonly signal?: AbortSignal;
 }): Promise<boolean> {
+  if (input.signal?.aborted) return false;
   const read = () => input.registry.get(input.atom);
   if (input.predicate(read())) {
     return true;
@@ -22,6 +24,7 @@ export async function waitForAtomValue<A>(input: {
         return;
       }
       settled = true;
+      input.signal?.removeEventListener("abort", abort);
       if (timeoutId !== null) {
         globalThis.clearTimeout(timeoutId);
       }
@@ -32,6 +35,7 @@ export async function waitForAtomValue<A>(input: {
       }
       resolve(result);
     };
+    const abort = () => finish(false);
 
     unsubscribe = input.registry.subscribe(input.atom, (value) => {
       if (input.predicate(value)) {
@@ -52,5 +56,7 @@ export async function waitForAtomValue<A>(input: {
     timeoutId = globalThis.setTimeout(() => {
       finish(false);
     }, input.timeoutMs);
+    input.signal?.addEventListener("abort", abort, { once: true });
+    if (input.signal?.aborted) abort();
   });
 }

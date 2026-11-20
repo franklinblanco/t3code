@@ -52,6 +52,7 @@ import { FoldedSettingsSection } from "./FoldedSettingsSection";
 import { LinkedEnvironmentsSettings } from "./LinkedEnvironmentsSettings";
 import { usePeerLinkHosts } from "~/state/peerLinks";
 import { LoadBalancingSettings } from "./LoadBalancingSettings";
+import { selectEphemeralControllerId, isEphemeralConnection } from "~/state/ephemeralEnvironments";
 import { PullRequestRoutingSettings } from "./PullRequestRoutingSettings";
 import { Input } from "../ui/input";
 import {
@@ -330,7 +331,9 @@ function ConnectionsSettingsContent({
   );
   const loadBalancingEnvironments = [
     ...(primaryEnvironment ? [primaryEnvironment] : []),
-    ...savedEnvironments.filter((environment) => environment.entry.enabled),
+    ...savedEnvironments.filter(
+      (environment) => environment.entry.enabled && !isEphemeralConnection(environment.entry),
+    ),
   ].filter((environment) => environment.connection.phase !== "unsupported");
   const [desktopServerExposureMutationError, setDesktopServerExposureMutationError] = useState<
     string | null
@@ -1863,7 +1866,10 @@ function ConnectionsSettingsContent({
           isSearchTarget={index === 0}
         />
       ))}
-      <LoadBalancingSettings environments={loadBalancingEnvironments} />
+      <LoadBalancingSettings
+        environments={loadBalancingEnvironments}
+        controllerId={selectEphemeralControllerId(primaryEnvironmentId, loadBalancingEnvironments)}
+      />
       <PullRequestRoutingSettings environments={loadBalancingEnvironments} />
     </SettingsPageContainer>
   );

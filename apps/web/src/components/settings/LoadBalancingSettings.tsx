@@ -1,5 +1,6 @@
-import { resolveEnvironmentMachineKind } from "@t3tools/contracts";
+import { resolveEnvironmentMachineKind, type EnvironmentId } from "@t3tools/contracts";
 import { msg, T, useGT, useMessages } from "gt-react";
+import { AsyncResult } from "effect/reactivity";
 
 import {
   useClientSettings,
@@ -8,32 +9,24 @@ import {
 } from "~/hooks/useSettings";
 import type { MessageResolver } from "~/i18n/messages";
 import type { EnvironmentPresentation } from "~/state/environments";
+import { useEphemeralEnvironments } from "~/state/ephemeralEnvironments";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Switch } from "../ui/switch";
 import { EnvironmentRow, EnvironmentTransportLabel } from "./EnvironmentRow";
 import { FoldedSettingsSection } from "./FoldedSettingsSection";
+import {
+  EphemeralEnvironmentsSection,
+  loadPreferenceForWeight,
+  loadPreferences,
+} from "./EphemeralEnvironmentsSection";
 import { useSearchableSetting } from "./settingsSearch";
-
-const preferences = [
-  { value: 100, label: msg("Prefer") },
-  { value: 50, label: msg("Normal", { $context: "load balancing preference" }) },
-  { value: 25, label: msg("Less often") },
-  { value: 0, label: msg("Manual only") },
-] as const;
+import { useSettingsSearchTarget } from "./settingsLayout";
 
 const summaryLabels = {
   100: msg("{environment} prefer"),
   25: msg("{environment} less often"),
   0: msg("{environment} manual only"),
 } as const;
-
-type LoadPreference = (typeof preferences)[number]["value"];
-
-function loadPreferenceForWeight(weight: number | undefined): LoadPreference {
-  if (weight === undefined || weight === 50) return 50;
-  if (weight === 0) return 0;
-  return weight < 50 ? 25 : 100;
-}
 
 function summarizeLoadPreferences(
   environments: ReadonlyArray<Pick<EnvironmentPresentation, "environmentId" | "label">>,
@@ -51,8 +44,10 @@ function summarizeLoadPreferences(
 
 export function LoadBalancingSettings({
   environments,
+  controllerId,
 }: {
   environments: ReadonlyArray<EnvironmentPresentation>;
+  controllerId: EnvironmentId | null;
 }) {
   const searchableSetting = useSearchableSetting();
   const settings = useClientSettings((current) => ({
@@ -62,11 +57,25 @@ export function LoadBalancingSettings({
   const settingsHydrated = useClientSettingsHydrated();
   const gt = useGT();
   const m = useMessages();
-  const items = preferences.map((entry) => ({ ...entry, label: m(entry.label) }));
-
-  if (environments.length < 2) return null;
-
+  const items = loadPreferences.map((entry) => ({ ...entry, label: m(entry.label) }));
+  const ephemeralData = AsyncResult.getOrElse(useEphemeralEnvironments(controllerId), () => null);
   const { id, title } = searchableSetting("load-balancing");
+  const entryTargetRef = useSettingsSearchTarget<HTMLElement>(id);
+  const ephemeralSection =
+    controllerId !== null && ephemeralData !== null ? (
+      <EphemeralEnvironmentsSection
+        key={controllerId}
+        environmentId={controllerId}
+        data={ephemeralData}
+      />
+    ) : null;
+  if (environments.length < 2 && !ephemeralData?.templates.length) {
+    return ephemeralSection ? (
+      <section id={id} ref={entryTargetRef} tabIndex={-1}>
+        {ephemeralSection}
+      </section>
+    ) : null;
+  }
   return (
     <FoldedSettingsSection
       id={id}
@@ -131,6 +140,7 @@ export function LoadBalancingSettings({
           </Select>
         </EnvironmentRow>
       ))}
+      {ephemeralSection}
     </FoldedSettingsSection>
   );
 }

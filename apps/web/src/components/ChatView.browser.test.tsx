@@ -2,11 +2,17 @@ import { createMemoryHistory } from "@tanstack/react-router";
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
   EnvironmentId,
+  EphemeralEnvironmentLeaseId,
+  EphemeralEnvironmentTemplateId,
   IssueTrackerKind,
   ORCHESTRATION_V2_WS_METHODS,
   RunId,
   ThreadId,
   WS_METHODS,
+  type EphemeralEnvironmentAcquireInput,
+  type EphemeralEnvironmentLease,
+  type EphemeralEnvironmentReleaseInput,
+  type EphemeralEnvironmentTemplate,
   type IssueDetail,
   type IssueRef,
   type ThreadIssueLink,
@@ -27,7 +33,7 @@ import { AppRoot } from "~/AppRoot";
 import "~/components/ChatView";
 import { DraftId, useComposerDraftStore } from "~/composerDraftStore";
 import { selectThreadDiffPanelSelection, useDiffPanelStore } from "~/diffPanelStore";
-import { __setClientSettingsForTests } from "~/hooks/useSettings";
+import { __setClientSettingsForTests, getClientSettings } from "~/hooks/useSettings";
 import stylesheet from "~/index.css?inline";
 import { environmentContextRecord } from "~/lib/composerContextRecords";
 import { startWorkspaceFocus } from "~/lib/workspaceFocus";
@@ -35,6 +41,7 @@ import { usePromptStashStore } from "~/promptStashStore";
 import { useRightPanelStore } from "~/rightPanelStore";
 import { getRouter } from "~/router";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
+import { primaryServerKeybindingsAtom } from "~/state/server";
 import { environmentThreadDetails } from "~/state/threads";
 import {
   ENVIRONMENT_ID,
@@ -393,6 +400,122 @@ it("a new draft does not load its reserved thread before the server lists it", a
   expect(threadRequests).toEqual([]);
 });
 
+it("cold-starts the highest-weight eligible overflow and keeps attachments when it cannot connect", async () => {
+  using _environment = installFakeEnvironment([]);
+  const previousSettings = getClientSettings();
+  using _settings = { [Symbol.dispose]: () => __setClientSettingsForTests(previousSettings) };
+  __setClientSettingsForTests({
+    ...DEFAULT_CLIENT_SETTINGS,
+    loadBalancingEnabled: true,
+    onboardingCompletedAt: "2026-01-01T00:00:00.000Z",
+  });
+  const draftId = DraftId.make("draft-ephemeral-overflow");
+  const store = useComposerDraftStore.getState();
+  using _draft = { [Symbol.dispose]: () => store.clearDraftThread(draftId) };
+  store.setProjectDraftThreadId(scopeProjectRef(ENVIRONMENT_ID, PROJECT_ID), draftId);
+  store.setPrompt(draftId, "Keep this draft");
+  const template: EphemeralEnvironmentTemplate = {
+    id: EphemeralEnvironmentTemplateId.make("overflow"),
+    label: "Overflow worker",
+    enabled: true,
+    weight: 50,
+    provisioner: { kind: "command", provisionCommand: "start", provisionTimeoutSeconds: 180 },
+    idleTimeoutMinutes: 15,
+    maxConcurrentLeases: 1,
+    eligibleRepositoryKeys: [],
+  };
+  using _templates = answerRpc(WS_METHODS.ephemeralEnvironmentsList, () =>
+    Effect.succeed({
+      templates: [
+        { ...template, id: EphemeralEnvironmentTemplateId.make("lower"), weight: 25 },
+        {
+          ...template,
+          id: EphemeralEnvironmentTemplateId.make("filtered"),
+          weight: 100,
+          eligibleRepositoryKeys: ["other"],
+        },
+        template,
+      ],
+      leases: [],
+    }),
+  );
+  using _resources = answerRpc(WS_METHODS.serverGetHostResources, () =>
+    Effect.succeed({
+      sampledAt: 0,
+      cpuUtilization: 1,
+      cpuCount: 8,
+      availableMemoryBytes: 8,
+      totalMemoryBytes: 16,
+    }),
+  );
+  const lease: EphemeralEnvironmentLease = {
+    leaseId: EphemeralEnvironmentLeaseId.make("overflow-lease"),
+    templateId: template.id,
+    generation: 1,
+    state: "ready",
+    allocationHandle: "worker",
+    environmentId: EnvironmentId.make("overflow-worker"),
+    httpUrl: null,
+    wsUrl: null,
+    bearerToken: null,
+    pairingToken: null,
+    workspaceRoot: null,
+    clientRequestId: null,
+    lastError: null,
+    createdAt: "2026-11-10T01:00:00.000Z",
+    updatedAt: "2026-11-10T01:00:00.000Z",
+    idleDeadlineAt: null,
+  };
+  const acquire = vi.fn((input: EphemeralEnvironmentAcquireInput) =>
+    Effect.succeed({
+      lease: { ...lease, clientRequestId: input.clientRequestId ?? null },
+      reused: false,
+    }),
+  );
+  using _acquire = answerRpc(WS_METHODS.ephemeralEnvironmentsAcquire, acquire);
+  const release = vi.fn(({ leaseId }: EphemeralEnvironmentReleaseInput) =>
+    Effect.succeed({
+      lease: { ...lease, leaseId, state: "released" as const },
+    }),
+  );
+  using _release = answerRpc(WS_METHODS.ephemeralEnvironmentsRelease, release);
+  await page.viewport(1400, 900);
+  const router = getRouter(createMemoryHistory({ initialEntries: [`/draft/${draftId}`] }));
+  await router.load();
+  await using _app = await render(<AppRoot router={router} />, {
+    // AppRoot brings its own router.
+    router: false,
+  });
+  using _uploads = acceptAttachmentUploads();
+  const editor = page.getByTestId("composer-editor");
+  await expect
+    .element(page.getByRole("combobox", { name: "Run on", exact: true }))
+    .toHaveTextContent("Overflow: Overflow worker");
+  expect(acquire).not.toHaveBeenCalled();
+  await userEvent.click(editor);
+  const clipboardData = new DataTransfer();
+  clipboardData.items.add(new File([PNG], "shot.png", { type: "image/png" }));
+  editor
+    .element()
+    .dispatchEvent(new ClipboardEvent("paste", { clipboardData, bubbles: true, cancelable: true }));
+  await expect.element(page.getByRole("img", { name: "shot.png" })).toBeVisible();
+  const prompt = store.getComposerDraft(draftId)?.prompt;
+  await userEvent.keyboard("{Enter}");
+
+  await expect.element(page.getByText("Could not send on the ephemeral environment")).toBeVisible();
+  await expect
+    .element(page.getByText("The lease did not provide a usable connection."))
+    .toBeVisible();
+  expect(acquire).toHaveBeenCalledExactlyOnceWith({
+    templateId: template.id,
+    clientRequestId: expect.any(String),
+  });
+  expect(release).toHaveBeenCalledExactlyOnceWith({ leaseId: "overflow-lease" });
+  expect(store.getDraftSession(draftId)?.environmentId).toBe(ENVIRONMENT_ID);
+  expect(store.getComposerDraft(draftId)?.prompt).toBe(prompt);
+  await expect.element(page.getByRole("img", { name: "shot.png" })).toBeVisible();
+});
+
 it("an interrupted image-only first send of a new thread says it may not have been sent", async () => {
   using _environment = installFakeEnvironment([]);
   __setClientSettingsForTests({
@@ -726,14 +849,13 @@ it("a mounted thread view lets go of the thread structures it has replaced", asy
 it("a shortcut conditioned on rightPanelOpen sees the thread's open right panel", async () => {
   await page.viewport(1280, 800);
   const thread = threadWithHistory("thread-panel-shortcut", 1);
-  using _environment = installFakeEnvironment([thread], {
-    keybindings: mergeWithDefaultKeybindings(
-      compileResolvedKeybindingsConfig([
-        { key: "ctrl+t", command: "rightPanel.new", when: "rightPanelOpen && !terminalFocus" },
-        { key: "ctrl+t", command: "rightPanel.toggle", when: "!rightPanelOpen" },
-      ]),
-    ),
-  });
+  const keybindings = mergeWithDefaultKeybindings(
+    compileResolvedKeybindingsConfig([
+      { key: "ctrl+t", command: "rightPanel.new", when: "rightPanelOpen && !terminalFocus" },
+      { key: "ctrl+t", command: "rightPanel.toggle", when: "!rightPanelOpen" },
+    ]),
+  );
+  using _environment = installFakeEnvironment([thread], { keybindings });
   __setClientSettingsForTests({
     ...DEFAULT_CLIENT_SETTINGS,
     onboardingCompletedAt: "2026-01-01T00:00:00.000Z",
@@ -746,6 +868,7 @@ it("a shortcut conditioned on rightPanelOpen sees the thread's open right panel"
     // AppRoot brings its own router.
     router: false,
   });
+  await expect.poll(() => appAtomRegistry.get(primaryServerKeybindingsAtom)).toEqual(keybindings);
   const composer = page.getByTestId("composer-editor");
   const toggle = page.getByRole("button", { name: "Toggle right panel", exact: true });
   await expect.element(toggle).toHaveAttribute("aria-pressed", "false");

@@ -9,7 +9,11 @@ import {
 } from "@t3tools/contracts";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { deriveThreadTitleSeed } from "@t3tools/client-runtime/operations";
-import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
+import {
+  type AtomCommandResult,
+  settlePromise,
+  squashAtomCommandFailure,
+} from "@t3tools/client-runtime/state/runtime";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { useNavigate } from "@tanstack/react-router";
 import { newMessageId } from "~/lib/utils";
@@ -101,6 +105,7 @@ export function useMultipleModelSend(input: MultipleModelSendInput) {
     buildOutgoingMessageContext,
     isCurrentSend,
     draftChangedDuringPreparation,
+    onStartSettled,
   }: {
     readonly threadId: ThreadId;
     readonly project: EnvironmentProject;
@@ -118,6 +123,7 @@ export function useMultipleModelSend(input: MultipleModelSendInput) {
     /** False once a newer send from this composer started. */
     readonly isCurrentSend: () => boolean;
     readonly draftChangedDuringPreparation: () => boolean;
+    readonly onStartSettled?: (result: AtomCommandResult<unknown, unknown>) => void;
   }) => {
     const { attachments: attachmentsSnapshot, messageText } = sendSnapshot;
     const failedSelections: ModelSelection[] = [];
@@ -167,8 +173,9 @@ export function useMultipleModelSend(input: MultipleModelSendInput) {
             ]),
             model: target.selection.model,
             uncertainSubmissions: uncertainSubmissionsRef.current,
-            start: (targetThreadId) => {
-              return startThreadTurn({
+            ...(onStartSettled ? { onStartSettled } : {}),
+            start: (targetThreadId) =>
+              startThreadTurn({
                 environmentId,
                 input: {
                   threadId: targetThreadId,
@@ -206,8 +213,7 @@ export function useMultipleModelSend(input: MultipleModelSendInput) {
                   },
                   createdAt: createdAt,
                 },
-              });
-            },
+              }),
             openThread: (threadId) =>
               void navigate({
                 to: "/$environmentId/$threadId",

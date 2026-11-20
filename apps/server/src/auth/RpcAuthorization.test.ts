@@ -32,13 +32,13 @@ import * as RpcTest from "effect/rpc/RpcTest";
 
 import {
   RPC_REQUIRED_SCOPES,
-  requiredScopeForRpcMethod,
+  requiredScopesForRpcMethod,
   requiredScopeForDeviceList,
 } from "./RpcAuthorization.ts";
 import * as RpcAuthorization from "./RpcAuthorization.ts";
 
 describe("RPC authorization scopes", () => {
-  it("declares exactly one scope for every RPC in the server group", () => {
+  it("declares required scopes for every RPC in the server group", () => {
     expect(new Set(Object.keys(RPC_REQUIRED_SCOPES))).toEqual(new Set(WsRpcGroup.requests.keys()));
   });
 
@@ -48,19 +48,19 @@ describe("RPC authorization scopes", () => {
       WS_METHODS.scheduledTasksGetWebhookDelivery,
       WS_METHODS.scheduledTasksRotateWebhookToken,
     ]) {
-      expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationOperateScope);
+      expect(requiredScopesForRpcMethod(method)).toEqual([AuthOrchestrationOperateScope]);
     }
   });
 
   it("keeps triage, which seeds an agent that reads logs and the database, behind operate scope", () => {
-    expect(requiredScopeForRpcMethod(WS_METHODS.serverPrepareTriage)).toBe(
+    expect(requiredScopesForRpcMethod(WS_METHODS.serverPrepareTriage)).toEqual([
       AuthOrchestrationOperateScope,
-    );
+    ]);
   });
 
   it("separates passive terminal observation from operations that can change a shell", () => {
     for (const method of [WS_METHODS.terminalObserve, WS_METHODS.subscribeTerminalMetadata]) {
-      expect(requiredScopeForRpcMethod(method)).toBe(AuthTerminalReadScope);
+      expect(requiredScopesForRpcMethod(method)).toEqual([AuthTerminalReadScope]);
     }
     for (const method of [
       WS_METHODS.terminalAttach,
@@ -71,23 +71,35 @@ describe("RPC authorization scopes", () => {
       WS_METHODS.terminalClose,
       WS_METHODS.previewStopLocalServer,
     ]) {
-      expect(requiredScopeForRpcMethod(method)).toBe(AuthTerminalOperateScope);
+      expect(requiredScopesForRpcMethod(method)).toEqual([AuthTerminalOperateScope]);
+    }
+  });
+
+  it("requires both settings and terminal access for provisioner commands", () => {
+    for (const method of [
+      WS_METHODS.ephemeralEnvironmentsUpsertTemplate,
+      WS_METHODS.ephemeralEnvironmentsDeleteTemplate,
+    ]) {
+      expect(requiredScopesForRpcMethod(method)).toEqual([
+        AuthSettingsWriteScope,
+        AuthTerminalOperateScope,
+      ]);
     }
   });
 
   it("lets thread readers observe and refresh checkout branches", () => {
     for (const method of [WS_METHODS.subscribeVcsBranch, WS_METHODS.vcsRefreshBranch]) {
-      expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationReadScope);
+      expect(requiredScopesForRpcMethod(method)).toEqual([AuthOrchestrationReadScope]);
     }
   });
 
   it("still lets readers load settings the way installed Swift clients ask", () => {
-    expect(requiredScopeForRpcMethod("server.getSettings")).toBe(AuthOrchestrationReadScope);
+    expect(requiredScopesForRpcMethod("server.getSettings")).toEqual([AuthOrchestrationReadScope]);
   });
 
   it("rejects unknown RPC method names", () => {
     for (const method of ["server.notRegistered", "toString", "constructor"]) {
-      expect(() => requiredScopeForRpcMethod(method)).toThrow(
+      expect(() => requiredScopesForRpcMethod(method)).toThrow(
         `RPC method ${method} has no declared authorization scope.`,
       );
     }

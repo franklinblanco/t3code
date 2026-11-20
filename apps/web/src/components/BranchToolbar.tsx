@@ -340,8 +340,7 @@ const RunContextSelector = memo(function RunContextSelector({
         }
         {...(!isPanel ? composerFloatingLayerProps : {})}
       >
-        {availableEnvironments &&
-        ((showEnvironmentPicker && onEnvironmentChange) || addTargets.length > 0) ? (
+        {availableEnvironments && (showEnvironmentPicker || addTargets.length > 0) ? (
           <>
             <MenuGroup>
               <MenuGroupLabel>
@@ -704,14 +703,19 @@ export const BranchToolbar = memo(function BranchToolbar({
     openAddProjectToMachine({ projectRef: activeProjectRef, targetEnvironmentId });
   // A project on one machine still gets the picker when it can be added to another.
   const hasMultipleEnvironments = (availableEnvironments?.length ?? 0) > 1 || addTargets.length > 0;
-  const showEnvironmentPicker = hasMultipleEnvironments && onEnvironmentChange !== undefined;
+  const showEnvironmentPicker =
+    (hasMultipleEnvironments && onEnvironmentChange !== undefined) ||
+    onAutoEnvironment !== undefined;
   const activeEnvironmentOption =
     availableEnvironments?.find((env) => env.environmentId === environmentId) ?? null;
   // Started threads get no handler but still show which machine they run on,
   // matching the strip visibility ChatView computes from the same inputs.
   const showEnvironmentIndicator = shouldShowEnvironmentIndicator({
     activeEnvironment: activeEnvironmentOption,
-    canPickEnvironment: hasMultipleEnvironments,
+    canPickEnvironment:
+      hasMultipleEnvironments ||
+      onAutoEnvironment !== undefined ||
+      autoEnvironmentLabel !== undefined,
   });
   const [attachStrip, labelsOverflow] = useLabelsOverflow();
 

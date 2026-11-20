@@ -231,6 +231,7 @@ import * as ProjectCloneTracker from "./project/ProjectCloneTracker.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
 import * as WorktreeSetupTracker from "./project/WorktreeSetupTracker.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
+import * as EphemeralEnvironmentManager from "./environment/EphemeralEnvironmentManager.ts";
 import * as DirectEndpoints from "./environment/DirectEndpoints.ts";
 import * as RemoteOpenTargets from "./environment/RemoteOpenTargets.ts";
 import * as DefectReporter from "./observability/DefectReporter.ts";
@@ -1559,6 +1560,7 @@ export const layerWsRpc = (
       const serverSettings = yield* ServerSettings.ServerSettingsService;
       const secretResolver = yield* SecretResolver.SecretResolver;
       const peerLinks = yield* PeerLinks.PeerLinks;
+      const ephemeralEnvironments = yield* EphemeralEnvironmentManager.EphemeralEnvironmentManager;
       const peerLinkRequests = yield* PeerLinkRequests.PeerLinkRequests;
       const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
       const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
@@ -2711,6 +2713,12 @@ export const layerWsRpc = (
           Effect.annotateCurrentSpan({ "orchestration_v2.thread_id": input.threadId }).pipe(
             Effect.andThen(peerLinkRequests.answer(input)),
           ),
+        [WS_METHODS.ephemeralEnvironmentsList]: () => ephemeralEnvironments.list,
+        [WS_METHODS.ephemeralEnvironmentsUpsertTemplate]: ephemeralEnvironments.upsertTemplate,
+        [WS_METHODS.ephemeralEnvironmentsDeleteTemplate]: ephemeralEnvironments.deleteTemplate,
+        [WS_METHODS.ephemeralEnvironmentsAcquire]: (input) =>
+          ephemeralEnvironments.acquire(input, currentSessionId),
+        [WS_METHODS.ephemeralEnvironmentsRelease]: ephemeralEnvironments.release,
         [WS_METHODS.serverGetSettings]: (_input) =>
           Effect.map(serverSettings.getSettings, (settings) =>
             ServerSettings.redactServerSettingsForClient(settings, settingsClient),
@@ -3617,6 +3625,7 @@ export const layer = Layer.unwrap(
     const issueTrackers = yield* IssueTrackerConnections.IssueTrackerConnections;
     const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
     const peerLinks = yield* PeerLinks.PeerLinks;
+    const ephemeralEnvironments = yield* EphemeralEnvironmentManager.EphemeralEnvironmentManager;
     const peerLinkRequests = yield* PeerLinkRequests.PeerLinkRequests;
     const sql = yield* SqlClient.SqlClient;
     return HttpRouter.add(
@@ -3717,6 +3726,12 @@ export const layer = Layer.unwrap(
                 ),
               ),
               Layer.provide(Layer.succeed(PeerLinks.PeerLinks, peerLinks)),
+              Layer.provide(
+                Layer.succeed(
+                  EphemeralEnvironmentManager.EphemeralEnvironmentManager,
+                  ephemeralEnvironments,
+                ),
+              ),
               Layer.provide(Layer.succeed(PeerLinkRequests.PeerLinkRequests, peerLinkRequests)),
               Layer.provide(
                 SourceControlDiscovery.layer.pipe(

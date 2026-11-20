@@ -362,6 +362,7 @@ export interface ChatComposerProps {
   composerDraftTarget: ScopedThreadRef | DraftId;
   environmentId: EnvironmentId;
   canOperateThread: boolean;
+  canSendThroughOverflow?: boolean;
   attachmentUploadsCapabilityKnown: boolean;
   supportsAttachmentUploads: boolean;
   supportsQuestionAttachments: boolean;
@@ -500,6 +501,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     composerDraftTarget,
     environmentId,
     canOperateThread,
+    canSendThroughOverflow = false,
     attachmentUploadsCapabilityKnown,
     supportsAttachmentUploads,
     supportsQuestionAttachments,
@@ -917,8 +919,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   });
   const noProviderAvailable =
     selectedProviderEntry === undefined && multipleModelSelections === null;
-  const providerCatalogPending = noProviderAvailable && !providerCatalogKnown;
-  const showProviderUnavailable = noProviderAvailable && !providerCatalogPending;
+  const submissionProviderUnavailable = noProviderAvailable && !canSendThroughOverflow;
+  const submissionEnvironmentUnavailable =
+    environmentUnavailable !== null && !canSendThroughOverflow;
+  const providerCatalogPending = submissionProviderUnavailable && !providerCatalogKnown;
+  const showProviderUnavailable = submissionProviderUnavailable && !providerCatalogPending;
   const providerSetupInstanceId = noProviderAvailable
     ? (unavailableProviderInstanceId ??
       (lockedProvider === null
@@ -957,8 +962,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     (activePendingProgress
       ? attachmentBlockReason
       : (attachmentBlockReason ??
-        runtimeModeCeilingDenial ??
-        (multipleModelSelections === null ? providerSendBlockReason : null)));
+        (canSendThroughOverflow ? null : runtimeModeCeilingDenial) ??
+        (multipleModelSelections === null && !canSendThroughOverflow
+          ? providerSendBlockReason
+          : null)));
   const isSendDisabled = sendDisabledReason !== null;
   const selectedProviderStatus = selectedProviderEntry?.snapshot ?? null;
   const selectedProviderSkills = selectedProviderStatus
@@ -1259,9 +1266,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     phase === "running" ||
     isSendBusy ||
     isSendDisabled ||
-    noProviderAvailable ||
+    submissionProviderUnavailable ||
     projectSelectionRequired ||
-    environmentUnavailable !== null ||
+    submissionEnvironmentUnavailable ||
     (!composerSendState.hasSendableContent && !showResumeAction);
   const collapsedComposerPrimaryActionLabel = showResumeAction
     ? gt("Resume thread")
@@ -1914,10 +1921,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const submissionTarget = activePendingProgress ? "pending-user-input" : "provider-turn";
   const submissionBlocked = isComposerSubmissionBlocked({
     submissionTarget,
-    noProviderAvailable,
+    noProviderAvailable: submissionProviderUnavailable,
     sendDisabledReason,
     attachmentBlockReason,
-    environmentUnavailable: environmentUnavailable !== null,
+    environmentUnavailable: submissionEnvironmentUnavailable,
   });
   const submitAfterPreparingImages = useSubmitAfterPreparingImages(
     attachmentTargetKey,
@@ -1928,8 +1935,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     (activePendingProgress ? attachmentBlockReason : sendDisabledReason) ??
     (speechInput.preparing ? gt("Preparing voice input") : null);
   const primaryActionEnvironmentUnavailable =
-    environmentUnavailable !== null ||
-    (!activePendingProgress && (noProviderAvailable || projectSelectionRequired));
+    submissionEnvironmentUnavailable ||
+    (!activePendingProgress && (submissionProviderUnavailable || projectSelectionRequired));
   const dictationShortcutLabel = useDictationShortcut({
     keybindings,
     speech: speechInput,
@@ -2175,7 +2182,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
   const shouldBlurMobileComposerOnSubmit = () => {
     if (!isSoftwareKeyboardOpen) return false;
-    if (isSendBusy || submissionBlocked || environmentUnavailable !== null || phase === "running") {
+    if (
+      isSendBusy ||
+      submissionBlocked ||
+      submissionEnvironmentUnavailable ||
+      phase === "running"
+    ) {
       return false;
     }
     if (activePendingProgress) {
@@ -2197,7 +2209,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       submitAfterDictation(() => submitComposerRef.current(dispatchMode, submissionIntent));
       return false;
     }
-    if (submissionBlocked || !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)) {
+    if (
+      submissionBlocked ||
+      (!canSendThroughOverflow &&
+        !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope))
+    ) {
       event?.preventDefault();
       return false;
     }
@@ -3838,7 +3854,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     // Stop state belongs to one thread; the composer stays mounted across threads.
                     key={`${environmentId}:${activeThreadId ?? "new"}`}
                     compact={isComposerPrimaryActionsCompact}
-                    canOperateThread={canOperateThread}
+                    canOperateThread={canOperateThread || canSendThroughOverflow}
                     pendingAction={pendingPrimaryAction}
                     isRunning={(phase === "running" || phase === "connecting") && !draftRunsLocally}
                     canInterrupt={canInterrupt}

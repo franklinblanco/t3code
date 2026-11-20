@@ -86,6 +86,17 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.peerLinksUnlink]: AuthAccessWriteScope,
   // A link lets every agent here reach the other environment: Settings' bar.
   [WS_METHODS.peerLinksAnswerRequest]: AuthAccessWriteScope,
+  [WS_METHODS.ephemeralEnvironmentsList]: AuthOrchestrationOperateScope,
+  [WS_METHODS.ephemeralEnvironmentsUpsertTemplate]: [
+    AuthSettingsWriteScope,
+    AuthTerminalOperateScope,
+  ],
+  [WS_METHODS.ephemeralEnvironmentsDeleteTemplate]: [
+    AuthSettingsWriteScope,
+    AuthTerminalOperateScope,
+  ],
+  [WS_METHODS.ephemeralEnvironmentsAcquire]: AuthOrchestrationOperateScope,
+  [WS_METHODS.ephemeralEnvironmentsRelease]: AuthOrchestrationOperateScope,
 } as const;
 export type ClientGuardedRpcTag = keyof typeof CLIENT_GUARDED_RPC_SCOPES;
 
@@ -109,7 +120,7 @@ export function clientRpcRequiredScopes(
     )
       return [AuthSourceControlWriteScope, AuthOrchestrationReadScope];
   }
-  return Object.hasOwn(CLIENT_GUARDED_RPC_SCOPES, method)
-    ? [CLIENT_GUARDED_RPC_SCOPES[method as ClientGuardedRpcTag]]
-    : [];
+  if (!Object.hasOwn(CLIENT_GUARDED_RPC_SCOPES, method)) return [];
+  const scopes = CLIENT_GUARDED_RPC_SCOPES[method as ClientGuardedRpcTag];
+  return typeof scopes === "string" ? [scopes] : scopes;
 }

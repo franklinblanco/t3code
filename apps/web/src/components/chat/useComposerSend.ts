@@ -23,6 +23,8 @@ import {
   AuthOrchestrationOperateScope,
   DEFAULT_MODEL,
   type EnvironmentId,
+  type ProviderDriverKind,
+  type ProviderInstanceId,
   type ModelSelection,
   type PreviewAnnotationPayload,
   type ResponseContextRecord,
@@ -49,7 +51,7 @@ import {
   scopeThreadRef,
 } from "@t3tools/client-runtime/environment";
 import { createModelSelection } from "@t3tools/shared/model";
-import { type SetStateAction, useLayoutEffect, useRef } from "react";
+import { type SetStateAction, useLayoutEffect, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import {
   isAtomCommandInterrupted,
@@ -65,7 +67,9 @@ import { type ChatMessage, DEFAULT_INTERACTION_MODE } from "../../types";
 import { recordPromptSent } from "../GitHubStarPrompt";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { writeTextToClipboard } from "~/hooks/useCopyToClipboard";
-import { newMessageId, newThreadId } from "~/lib/utils";
+import { newMessageId, newThreadId, randomUUID } from "~/lib/utils";
+import * as Cause from "effect/Cause";
+import { AsyncResult } from "effect/reactivity";
 import { useNewThreadHandler } from "../../hooks/useHandleNewThread";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import {
@@ -93,7 +97,9 @@ import {
   previewAnnotationContextReference,
   responseContextReference,
 } from "../../lib/composerContextRecords";
-import { environmentServerConfigsAtom } from "../../state/server";
+import { environmentServerConfigsAtom, serverEnvironment } from "../../state/server";
+import { useAtomCommand } from "../../state/use-atom-command";
+import { prepareEphemeralDestination } from "../../lib/ephemeralEnvironmentRouting";
 import { threadEnvironment } from "../../state/threads";
 import { runMobileComposerTransition } from "./draftHeroTransition";
 import { useClientSettingsHydrated } from "../../hooks/useSettings";
@@ -105,6 +111,7 @@ import {
   loadBalancingSendWarning,
   multipleModelSendBlock,
   referencedThreadContexts,
+  withEphemeralLease,
 } from "./composerSend.logic";
 import { useMultipleModelSend } from "./useMultipleModelSend";
 import type { SideChatMessage } from "./useSideChat";
@@ -248,6 +255,11 @@ interface ComposerSendInput {
   readonly needsLoadBalancing: boolean;
   readonly loadBalancing: DraftEnvironmentRouting["loadBalancing"];
   readonly refreshBeforeSend: DraftEnvironmentRouting["refreshBeforeSend"];
+  readonly retargetForOverflow: DraftEnvironmentRouting["retargetForOverflow"];
+  readonly overflowControllerId: EnvironmentId | null;
+  readonly overflowRepositoryKey: string | null;
+  readonly overflowDriver: ProviderDriverKind;
+  readonly overflowProviderInstanceId: ProviderInstanceId | null;
   readonly readPendingEnvironmentChange: DraftEnvironmentRouting["readPendingEnvironmentChange"];
   readonly pendingApprovals: PendingThreadRequests["pendingApprovals"];
   readonly respondingRequestIds: PendingThreadRequests["respondingRequestIds"];
@@ -345,6 +357,11 @@ export function useComposerSend(input: ComposerSendInput) {
     needsLoadBalancing,
     loadBalancing,
     refreshBeforeSend,
+    retargetForOverflow,
+    overflowControllerId,
+    overflowRepositoryKey,
+    overflowDriver,
+    overflowProviderInstanceId,
     readPendingEnvironmentChange,
     pendingApprovals,
     respondingRequestIds,
@@ -396,6 +413,28 @@ export function useComposerSend(input: ComposerSendInput) {
     setThreadError,
   });
   const { sendInFlight: sendInFlightRef } = draftSendState(routeThreadKey);
+  const acquireEphemeral = useAtomCommand(serverEnvironment.ephemeralEnvironmentsAcquire, {
+    reportFailure: false,
+  });
+  const releaseEphemeral = useAtomCommand(serverEnvironment.ephemeralEnvironmentsRelease, {
+    reportFailure: false,
+  });
+  const [provisioning, setProvisioning] = useState<{ draftId: DraftId; label: string } | null>(
+    null,
+  );
+  const overflowRequestRef = useRef<{ draftId: DraftId; controller: AbortController } | null>(null);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- abandons overflow preparation when its draft closes or changes
+  useLayoutEffect(
+    () => () => {
+      const request = overflowRequestRef.current;
+      if (request?.draftId === draftId) request.controller.abort();
+    },
+    [draftId],
+  );
+  const overflowProviderStillSelected = useStableCallback(
+    (driver: ProviderDriverKind, instanceId: ProviderInstanceId | null) =>
+      overflowDriver === driver && overflowProviderInstanceId === instanceId,
+  );
   const composerSendGenerationRef = useRef(0);
   const environmentUnavailableSendToastSlotRef = useRef(0);
   // A send awaits uploads before it declines, so it reads the approvals pending by then.
@@ -414,6 +453,10 @@ export function useComposerSend(input: ComposerSendInput) {
     directAnnotation?: {
       annotation: PreviewAnnotationPayload;
       image: ComposerImageAttachment | null;
+    },
+    overflowSend?: {
+      readonly signal: AbortSignal;
+      readonly onStartSettled: (result: AtomCommandResult<unknown, unknown>) => void;
     },
   ) => {
     e?.preventDefault();
@@ -1042,6 +1085,7 @@ export function useComposerSend(input: ComposerSendInput) {
       .getState()
       .getComposerDraft(composerDraftTarget);
     const draftChangedDuringPreparation = () => {
+      if (overflowSend?.signal.aborted) return true;
       if (composerRef.current?.hasPendingAttachments() === true) return true;
       const draft = useComposerDraftStore.getState().getComposerDraft(composerDraftTarget);
       return composerDraftContentChanged(draftBeforePreparation, draft);
@@ -1308,6 +1352,7 @@ export function useComposerSend(input: ComposerSendInput) {
         buildOutgoingMessageContext,
         isCurrentSend: () => composerSendGenerationRef.current === sendGeneration,
         draftChangedDuringPreparation,
+        ...(overflowSend ? { onStartSettled: overflowSend.onStartSettled } : {}),
       });
       return;
     }
@@ -1410,6 +1455,14 @@ export function useComposerSend(input: ComposerSendInput) {
     if (failure === null && turnAttachmentsResult._tag === "Failure") {
       failure = turnAttachmentsResult;
     }
+    if (
+      failure === null &&
+      overflowSend &&
+      (overflowSend.signal.aborted ||
+        !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope))
+    ) {
+      failure = AsyncResult.failure(Cause.fail(new Error(m(msg("Ephemeral send was cancelled.")))));
+    }
 
     if (failure === null && compactBeforeSend) {
       const compactResult = await startThreadTurn({
@@ -1428,6 +1481,7 @@ export function useComposerSend(input: ComposerSendInput) {
           interactionMode: DEFAULT_INTERACTION_MODE,
         },
       });
+      overflowSend?.onStartSettled(compactResult);
       if (compactResult._tag === "Failure") {
         failure = compactResult;
       }
@@ -1526,6 +1580,7 @@ export function useComposerSend(input: ComposerSendInput) {
         }
       }
       const startResult = await startPromise;
+      overflowSend?.onStartSettled(startResult);
       if (startResult._tag === "Failure") {
         failure = startResult;
       } else {
@@ -1692,10 +1747,33 @@ export function useComposerSend(input: ComposerSendInput) {
   };
 
   const onSendLatest = useStableCallback(onSend);
-  const onSendWithRouting = async (...args: Parameters<typeof onSend>) => {
+  const onSendWithRouting = async (
+    ...args: [
+      Parameters<typeof onSend>[0]?,
+      Parameters<typeof onSend>[1]?,
+      Parameters<typeof onSend>[2]?,
+      Parameters<typeof onSend>[3]?,
+    ]
+  ) => {
     args[0]?.preventDefault();
+    if (
+      overflowRequestRef.current !== null &&
+      !overflowRequestRef.current.controller.signal.aborted
+    )
+      return;
+    const store = useComposerDraftStore.getState();
+    const originalDraft = draftId === null ? null : store.getDraftSession(draftId);
+    const composerDraft = store.getComposerDraft(composerDraftTarget);
+    const localUsageCommand =
+      usageLimitsOffered &&
+      usageLimitsKey !== null &&
+      !draftHasNonPromptContent(composerDraftTarget) &&
+      isUsageLimitsCommand(promptRef.current);
     const refresh =
-      args[3] || sendInFlightRef.current || readPendingEnvironmentChange() !== null
+      args[3] ||
+      sendInFlightRef.current ||
+      readPendingEnvironmentChange() !== null ||
+      (needsLoadBalancing && (localUsageCommand || !composerDraftHasUserContent(composerDraft)))
         ? null
         : refreshBeforeSend();
     if (refresh === null) return onSend(...args);
@@ -1703,7 +1781,119 @@ export function useComposerSend(input: ComposerSendInput) {
     const ready = await refresh.finally(() => {
       sendInFlightRef.current = false;
     });
-    if (ready) return onSendLatest(...args);
+    if (ready === true) return onSendLatest(...args);
+    if (
+      !ready ||
+      !draftId ||
+      !activeProject ||
+      !overflowControllerId ||
+      !activeThread ||
+      !isLocalDraftThread ||
+      !clientSettingsHydrated ||
+      threadDetailLoading ||
+      isRevertingCheckpoint ||
+      isSendBusy ||
+      localUsageCommand ||
+      feedbackUploadsInFlightRef.current.has(routeThreadKey) ||
+      composerRef.current?.hasPendingAttachments()
+    )
+      return;
+
+    const controller = new AbortController();
+    const { signal } = controller;
+    const { template } = ready;
+    const provisioningRequest = { draftId, label: template.label };
+    const assertCurrentDraft = () => {
+      signal.throwIfAborted();
+      if (
+        currentRouteThreadKeyRef.current !== routeThreadKey ||
+        store.getDraftSession(draftId) !== originalDraft ||
+        !overflowProviderStillSelected(overflowDriver, overflowProviderInstanceId) ||
+        composerDraftContentChanged(composerDraft, store.getComposerDraft(composerDraftTarget)) ||
+        composerRef.current?.hasPendingAttachments()
+      )
+        throw new Error(
+          m(msg("Draft changed while preparing this message. Review it and send again.")),
+        );
+    };
+    const request = { draftId, controller };
+    overflowRequestRef.current = request;
+    sendInFlightRef.current = true;
+    setProvisioning(provisioningRequest);
+    const outcome = await settlePromise(async () => {
+      assertCurrentDraft();
+      const clientRequestId = randomUUID();
+      await withEphemeralLease({
+        acquire: async () => {
+          const result = await acquireEphemeral({
+            environmentId: overflowControllerId,
+            input: {
+              templateId: template.id,
+              clientRequestId,
+              ...(overflowRepositoryKey === null ? {} : { repositoryKey: overflowRepositoryKey }),
+            },
+          });
+          if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+          return result.value;
+        },
+        release: async (leaseId) => {
+          const released = await releaseEphemeral({
+            environmentId: overflowControllerId,
+            input: { leaseId },
+          });
+          if (released._tag === "Failure")
+            toastManager.add(
+              stackedThreadToast({
+                type: "error",
+                title: m(msg("Could not release the ephemeral environment.")),
+                description: thrownErrorMessage(squashAtomCommandFailure(released), m),
+              }),
+            );
+        },
+        prepare: async (lease) => {
+          assertCurrentDraft();
+          if (lease.state !== "ready")
+            throw new Error(
+              lease.lastError ?? m(msg("The ephemeral environment did not become ready.")),
+            );
+          const projectRef = await prepareEphemeralDestination({
+            lease,
+            label: template.label,
+            project: activeProject,
+            repositoryKey: overflowRepositoryKey,
+            driver: overflowDriver,
+            instanceId: overflowProviderInstanceId,
+            signal,
+          });
+          assertCurrentDraft();
+          const restoreRoute = retargetForOverflow(projectRef);
+          if (!restoreRoute) throw new Error(m(msg("Ephemeral send was cancelled.")));
+          return restoreRoute;
+        },
+        send: (onStartSettled) => {
+          sendInFlightRef.current = false;
+          return onSendLatest(args[0], args[1], args[2], args[3], { signal, onStartSettled });
+        },
+      });
+    });
+    sendInFlightRef.current = false;
+    if (overflowRequestRef.current === request) overflowRequestRef.current = null;
+    setProvisioning((current) => (current === provisioningRequest ? null : current));
+    if (outcome._tag === "Failure") {
+      const error = squashAtomCommandFailure(outcome);
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: m(msg("Could not send on the ephemeral environment")),
+          description: signal.aborted
+            ? m(msg("Ephemeral send was cancelled."))
+            : (thrownErrorMessage(error, m) ?? m(msg("An error occurred."))),
+        }),
+      );
+    }
   };
-  return { onSend: onSendWithRouting };
+  return {
+    onSend: onSendWithRouting,
+    provisioningEnvironmentLabel: provisioning?.draftId === draftId ? provisioning.label : null,
+  };
 }

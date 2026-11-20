@@ -1436,9 +1436,40 @@ export function createServerEnvironmentAtoms<R, E>(
     scheduler: configScheduler,
     concurrency: configConcurrency,
   });
+  const ephemeralEnvironmentsList = createEnvironmentRpcQueryAtomFamily(runtime, {
+    label: "environment-data:ephemeral-environments:list",
+    tag: WS_METHODS.ephemeralEnvironmentsList,
+    refreshIntervalMs: 10_000,
+    idleTtlMs: 0,
+  });
+  const refreshEphemeralEnvironments = (
+    { environmentId }: { readonly environmentId: EnvironmentId },
+    registry: AtomRegistry.AtomRegistry,
+  ) => Effect.sync(() => registry.refresh(ephemeralEnvironmentsList({ environmentId, input: {} })));
 
   return {
     configValueAtom,
+    ephemeralEnvironmentsList,
+    ephemeralEnvironmentsUpsertTemplate: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:ephemeral-environments:upsert-template",
+      tag: WS_METHODS.ephemeralEnvironmentsUpsertTemplate,
+      onSettled: refreshEphemeralEnvironments,
+    }),
+    ephemeralEnvironmentsDeleteTemplate: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:ephemeral-environments:delete-template",
+      tag: WS_METHODS.ephemeralEnvironmentsDeleteTemplate,
+      onSettled: refreshEphemeralEnvironments,
+    }),
+    ephemeralEnvironmentsAcquire: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:ephemeral-environments:acquire",
+      tag: WS_METHODS.ephemeralEnvironmentsAcquire,
+      onSettled: refreshEphemeralEnvironments,
+    }),
+    ephemeralEnvironmentsRelease: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:ephemeral-environments:release",
+      tag: WS_METHODS.ephemeralEnvironmentsRelease,
+      onSettled: refreshEphemeralEnvironments,
+    }),
     runStorageCleanup: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:run-storage-cleanup",
       tag: WS_METHODS.serverRunStorageCleanup,

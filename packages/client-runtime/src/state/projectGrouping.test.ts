@@ -1,8 +1,19 @@
-import { EnvironmentId, ProjectId, SourceControlProviderKind } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  EphemeralEnvironmentLeaseId,
+  EphemeralEnvironmentTemplateId,
+  ProjectId,
+  SourceControlProviderKind,
+  type EphemeralEnvironmentLease,
+  type EphemeralEnvironmentTemplate,
+} from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import type { EnvironmentProject } from "./models.ts";
-import { chooseLoadBalancedEnvironment } from "../load-balancing.ts";
+import {
+  chooseEphemeralOverflowTemplate,
+  chooseLoadBalancedEnvironment,
+} from "../load-balancing.ts";
 import {
   buildProjectGroups,
   deriveLogicalProjectKeyFromSettings,
@@ -90,6 +101,162 @@ const repositoryIdentity = {
   name: "t3code",
   displayName: "T3 Code",
 };
+
+describe("load balancing ephemeral overflow", () => {
+  const repositoryKey = repositoryIdentity.canonicalKey;
+
+  function makeTemplate(
+    id: string,
+    overrides: Partial<EphemeralEnvironmentTemplate> = {},
+  ): EphemeralEnvironmentTemplate {
+    return {
+      id: EphemeralEnvironmentTemplateId.make(id),
+      label: id,
+      enabled: true,
+      weight: 50,
+      provisioner: { kind: "command", provisionCommand: "provision", provisionTimeoutSeconds: 180 },
+      idleTimeoutMinutes: 15,
+      maxConcurrentLeases: 1,
+      eligibleRepositoryKeys: [],
+      ...overrides,
+    };
+  }
+
+  function makeLease(
+    template: EphemeralEnvironmentTemplate,
+    state: EphemeralEnvironmentLease["state"],
+    id: string = state,
+  ): EphemeralEnvironmentLease {
+    return {
+      leaseId: EphemeralEnvironmentLeaseId.make(id),
+      templateId: template.id,
+      generation: 0,
+      state,
+      allocationHandle: null,
+      environmentId: null,
+      httpUrl: null,
+      wsUrl: null,
+      bearerToken: null,
+      pairingToken: null,
+      workspaceRoot: null,
+      clientRequestId: null,
+      lastError: null,
+      createdAt: "2026-07-01T00:00:00.000Z",
+      updatedAt: "2026-07-01T00:00:00.000Z",
+      idleDeadlineAt: null,
+    };
+  }
+
+  it("ignores disabled and manual-only templates and honors weight overrides", () => {
+    const disabled = makeTemplate("disabled", { enabled: false, weight: 100 });
+    const manual = makeTemplate("manual", { weight: 0 });
+    const preferred = makeTemplate("preferred", { weight: 100 });
+    const normal = makeTemplate("normal");
+    const input = {
+      templates: [disabled, manual, preferred, normal],
+      activeLeases: [],
+      repositoryKey,
+    };
+
+    expect(chooseEphemeralOverflowTemplate(input)).toEqual({
+      template: preferred,
+      reusableLease: null,
+    });
+    expect(
+      chooseEphemeralOverflowTemplate({
+        ...input,
+        weights: { [preferred.id]: 0, [disabled.id]: 100 },
+      }),
+    ).toEqual({ template: normal, reusableLease: null });
+    expect(
+      chooseEphemeralOverflowTemplate({
+        ...input,
+        weights: { [manual.id]: 100, [preferred.id]: 0 },
+      }),
+    ).toEqual({ template: manual, reusableLease: null });
+    expect(chooseEphemeralOverflowTemplate({ ...input, templates: [disabled, manual] })).toBeNull();
+  });
+
+  it("uses restricted templates only for an eligible repository", () => {
+    const restricted = makeTemplate("restricted", {
+      weight: 100,
+      eligibleRepositoryKeys: [repositoryKey],
+    });
+    const unrestricted = makeTemplate("unrestricted");
+    const input = { templates: [restricted, unrestricted], activeLeases: [] };
+
+    expect(chooseEphemeralOverflowTemplate({ ...input, repositoryKey })?.template).toBe(restricted);
+    for (const other of ["github.com/t3tools/other", null, undefined]) {
+      expect(chooseEphemeralOverflowTemplate({ ...input, repositoryKey: other })?.template).toBe(
+        unrestricted,
+      );
+    }
+  });
+
+  it("counts active leases per template and frees capacity for suspended and terminal leases", () => {
+    const template = makeTemplate("worker", { maxConcurrentLeases: 2 });
+    const other = makeTemplate("other", { weight: 0 });
+    const activeLeases = [
+      makeLease(template, "provisioning"),
+      makeLease(template, "suspended"),
+      makeLease(template, "released"),
+      makeLease(template, "failed"),
+      makeLease(other, "ready"),
+    ];
+    const input = { templates: [template, other], activeLeases, repositoryKey };
+
+    expect(chooseEphemeralOverflowTemplate(input)).toEqual({ template, reusableLease: null });
+    for (const state of ["provisioning", "ready", "draining", "releasing"] as const) {
+      expect(
+        chooseEphemeralOverflowTemplate({
+          ...input,
+          activeLeases: [...activeLeases, makeLease(template, state, "second")],
+        }),
+      ).toBeNull();
+    }
+  });
+
+  it("can reuse the first ready lease at capacity when the caller opts in", () => {
+    const template = makeTemplate("preferred", { weight: 100, maxConcurrentLeases: 2 });
+    const fallback = makeTemplate("fallback");
+    const ready = makeLease(template, "ready");
+    const otherReady = makeLease(template, "ready", "second");
+    const input = {
+      templates: [template, fallback],
+      activeLeases: [ready, otherReady],
+      repositoryKey,
+    };
+
+    expect(chooseEphemeralOverflowTemplate(input)).toEqual({
+      template: fallback,
+      reusableLease: null,
+    });
+    expect(chooseEphemeralOverflowTemplate({ ...input, allowReuseReady: true })).toEqual({
+      template,
+      reusableLease: ready,
+    });
+    expect(
+      chooseEphemeralOverflowTemplate({
+        ...input,
+        allowReuseReady: true,
+        activeLeases: [makeLease(template, "provisioning"), makeLease(template, "draining")],
+      }),
+    ).toEqual({ template: fallback, reusableLease: null });
+  });
+
+  it("breaks effective-weight ties in template input order", () => {
+    const first = makeTemplate("z-worker", { weight: 25 });
+    const second = makeTemplate("a-worker");
+    const input = { activeLeases: [], repositoryKey, weights: { [first.id]: 50 } };
+
+    expect(
+      chooseEphemeralOverflowTemplate({ ...input, templates: [first, second] })?.template,
+    ).toBe(first);
+    expect(
+      chooseEphemeralOverflowTemplate({ ...input, templates: [second, first] })?.template,
+    ).toBe(second);
+  });
+});
 
 function makeProject(
   id: string,

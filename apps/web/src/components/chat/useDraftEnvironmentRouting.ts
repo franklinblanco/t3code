@@ -7,9 +7,9 @@ import { useScratchProject } from "../../hooks/useScratchProject";
 import { useStableCallback } from "../../hooks/useStableCallback";
 import {
   type EnvironmentId,
+  type ScopedProjectRef,
   type ProviderDriverKind,
   ProviderInstanceId,
-  resolveProjectProviderInstanceEnabled,
   type ThreadContextRecord,
 } from "@t3tools/contracts";
 import {
@@ -37,6 +37,10 @@ import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import type { DraftSessionState } from "../../composerDraftStore";
 import { loadBalancingSendWarning } from "./composerSend.logic";
+import {
+  type chooseEphemeralOverflowTemplate,
+  isRoutingProviderAvailable,
+} from "@t3tools/client-runtime/load-balancing";
 import { appAtomRegistry } from "../../rpc/atomRegistry";
 import { seedDraftModelSelection } from "../../lib/seedDraftModelSelection";
 import { draftFanoutSelectionsAtom } from "./chatViewSend";
@@ -60,6 +64,7 @@ interface DraftEnvironmentRoutingInput {
   readonly activeProjectIsScratch: boolean;
   readonly projectGroupingSettings: ReturnType<typeof selectProjectGroupingSettings>;
   readonly sendInFlightRef: { readonly current: boolean };
+  readonly overflow?: ReturnType<typeof chooseEphemeralOverflowTemplate>;
 }
 
 // Multiple-model selections are kept per route, so a draft moving machine takes them along.
@@ -101,6 +106,7 @@ export function useDraftEnvironmentRouting(input: DraftEnvironmentRoutingInput) 
     activeProjectIsScratch,
     projectGroupingSettings,
     sendInFlightRef,
+    overflow,
   } = input;
   const setDraftThreadContext = useComposerDraftStore((store) => store.setDraftThreadContext);
   const getDraftSession = useComposerDraftStore((store) => store.getDraftSession);
@@ -123,25 +129,15 @@ export function useDraftEnvironmentRouting(input: DraftEnvironmentRoutingInput) 
             referencedThreadContexts.every(
               (record) => record.environmentId === candidate.environmentId,
             ) &&
-            providersByEnvironment
-              .get(candidate.environmentId)
-              ?.some(
-                (provider) =>
-                  (activeProviderInstanceId === null ||
-                    provider.instanceId === activeProviderInstanceId) &&
-                  provider.driver === selectedProvider &&
-                  (environment.serverConfig?.settings
-                    ? resolveProjectProviderInstanceEnabled(
-                        environment.serverConfig.settings,
-                        candidate.projectId,
-                        provider.instanceId,
-                      )
-                    : provider.enabled) &&
-                  provider.installed &&
-                  provider.status !== "error" &&
-                  provider.auth.status !== "unauthenticated" &&
-                  provider.availability !== "unavailable",
-              )
+            providersByEnvironment.get(candidate.environmentId)?.some((provider) =>
+              isRoutingProviderAvailable({
+                provider,
+                instanceId: activeProviderInstanceId,
+                driver: selectedProvider,
+                projectId: candidate.projectId,
+                settings: environment.serverConfig?.settings,
+              }),
+            )
           );
         })
         .map((candidate) => candidate.environmentId)
@@ -150,14 +146,21 @@ export function useDraftEnvironmentRouting(input: DraftEnvironmentRoutingInput) 
     needsLoadBalancing ? loadBalancingCandidates : [],
     loadBalancingSettings.loadBalancingWeights,
   );
+  const usableOverflow = referencedThreadContexts.length === 0 ? (overflow ?? null) : null;
+  const pendingOverflow =
+    needsLoadBalancing && !loadBalancing.pending && loadBalancing.environmentId === null
+      ? usableOverflow
+      : null;
+  const readOverflow = useStableCallback(() => usableOverflow);
   const readRouting = useStableCallback(() => ({ input, loadBalancingCandidates }));
   const refreshBeforeSend = () => {
     if (
       !automaticEnvironment ||
       !draftId ||
-      !draftThread?.loadBalancedEnvironmentId ||
+      !draftThread ||
+      (!draftThread.loadBalancedEnvironmentId && usableOverflow === null) ||
       draftThread.promotedTo ||
-      composerHasAttachments
+      (composerHasAttachments && (draftThread.loadBalancedEnvironmentId || usableOverflow === null))
     )
       return null;
     const originalDraft = getDraftSession(draftId);
@@ -167,7 +170,7 @@ export function useDraftEnvironmentRouting(input: DraftEnvironmentRoutingInput) 
       if (
         current.input.draftId !== draftId ||
         !current.input.automaticEnvironment ||
-        current.input.composerHasAttachments ||
+        current.input.composerHasAttachments !== composerHasAttachments ||
         current.input.activeProjectKey !== activeProjectKey ||
         current.input.selectedProvider !== selectedProvider ||
         current.input.activeProviderInstanceId !== activeProviderInstanceId ||
@@ -182,6 +185,8 @@ export function useDraftEnvironmentRouting(input: DraftEnvironmentRoutingInput) 
         (candidate) => candidate.environmentId === environmentId,
       );
       if (!target?.projectId) {
+        const overflow = readOverflow();
+        if (overflow) return overflow;
         toastManager.add({
           type: "warning",
           ...loadBalancingSendWarning({
@@ -205,6 +210,35 @@ export function useDraftEnvironmentRouting(input: DraftEnvironmentRoutingInput) 
       );
       return true;
     });
+  };
+  const retargetForOverflow = (projectRef: ScopedProjectRef) => {
+    if (!draftId) return null;
+    const original = getDraftSession(draftId);
+    if (!original || original.promotedTo) return null;
+    carryFanoutSelections(original, projectRef.environmentId);
+    flushSync(() =>
+      setDraftThreadContext(draftId, {
+        projectRef,
+        environmentSelection: "auto",
+        loadBalancedEnvironmentId: projectRef.environmentId,
+        branch: original.branch,
+      }),
+    );
+    return () => {
+      const draft = getDraftSession(draftId);
+      if (
+        draft?.promotedTo ||
+        draft?.environmentId !== projectRef.environmentId ||
+        draft.projectId !== projectRef.projectId
+      )
+        return;
+      setDraftThreadContext(draftId, {
+        projectRef: scopeProjectRef(original.environmentId, original.projectId),
+        environmentSelection: original.environmentSelection ?? "auto",
+        loadBalancedEnvironmentId: original.loadBalancedEnvironmentId ?? null,
+        branch: original.branch,
+      });
+    };
   };
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- writes the resolved load-balanced environment into the draft store once the async pick settles
   useEffect(() => {
@@ -261,9 +295,11 @@ export function useDraftEnvironmentRouting(input: DraftEnvironmentRoutingInput) 
       ? gt("Auto balance")
       : loadBalancing.pending
         ? gt("Checking machines…")
-        : loadBalancing.failed
-          ? gt("Auto balance unavailable")
-          : gt("Auto balance")
+        : pendingOverflow
+          ? gt("Overflow: {environment}", { environment: pendingOverflow.template.label })
+          : loadBalancing.failed
+            ? gt("Auto balance unavailable")
+            : gt("Auto balance")
     : undefined;
 
   // A change in flight belongs to the draft and project it started on.
@@ -397,6 +433,9 @@ export function useDraftEnvironmentRouting(input: DraftEnvironmentRoutingInput) 
     needsLoadBalancing,
     loadBalancing,
     refreshBeforeSend,
+    retargetForOverflow,
+    ephemeralOverflowTemplate: pendingOverflow?.template ?? null,
+    ephemeralOverflowLease: pendingOverflow?.reusableLease ?? null,
     onAutoEnvironmentStable,
     autoEnvironmentLabel,
     isEnvironmentChanging,

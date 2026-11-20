@@ -183,7 +183,7 @@ different permissions.
 Auto balance is off by default. On web and desktop, enable it in
 **Settings → Environments → Load balancing** to automatically choose a machine for
 new threads in projects grouped across connected environments. The section
-appears once two or more machines are switched on.
+appears once at least two machines are switched on or an ephemeral environment is configured.
 Each machine starts at **Normal**. Choose **Prefer** to favor it when it has CPU and
 memory available, **Less often** to reduce its share, or **Manual only** to exclude
 it from automatic selection. These are preferences, not fixed traffic percentages.
@@ -193,8 +193,50 @@ The composer checks eligible machines when choosing a draft's environment, then 
 that choice stable. Choose **Auto balance** again to check current resources, or choose
 a specific machine to override it. Choosing a branch or worktree also keeps the draft
 on that machine. Existing threads stay where they started. If resource checks are
-unavailable or all eligible machines are full, choose a machine manually to continue.
+unavailable or all eligible machines are full, T3 Code can try an ephemeral environment.
 Mobile keeps its manual environment selection.
+
+### Ephemeral load-balancing environments
+
+In **Settings → Environments**, choose **Add ephemeral environment** and enable
+**Load balancing**. On the first send, T3 Code tries connected machines that have
+the project, the selected provider, and enough free resources. If none qualifies,
+it starts the highest-weight eligible template with available lease capacity.
+Leave the repository filter empty to allow any project. A **Manual only** template
+can still be started from Settings. **Start** connects the new worker so you can
+select it for a thread.
+
+The primary host runs the provision command. A hosted web client without a
+primary host uses its first enabled permanent environment. The command's stdout
+must contain one JSON object with `httpUrl`, `wsUrl`, and `allocationHandle`. The URLs must be reachable
+from the client. Include `bearerToken` or `pairingToken` for client authentication.
+You can also include `workspaceRoot` for a checkout prepared on the new machine.
+Write any progress logs to stderr. If T3 Code needs to clone the project, the
+worker uses its own Git credentials.
+
+The teardown command receives `T3_EPHEMERAL_ALLOCATION_HANDLE`,
+`T3_EPHEMERAL_LEASE_ID`, and `T3_EPHEMERAL_TEMPLATE_ID`. Use the allocation handle
+to stop the specific machine when the lease is released. When the idle timeout
+elapses, T3 Code checks the worker for active turns and background work. If the
+worker is busy or T3 Code cannot verify its activity, it extends the timeout and
+checks again later. Automatic release needs a bearer token with permission to
+read the worker’s activity.
+
+For example, a provision script on a host with the Colab CLI installed and signed
+in could create an L4 runtime, then call your bootstrap script over SSH. The
+bootstrap script starts T3 Code, exposes its endpoints, and prints the JSON
+response. Use the session name as `allocationHandle`.
+
+```sh
+session="t3-overflow-$T3_EPHEMERAL_LEASE_ID"
+colab new -s "$session" --gpu L4 >&2 || exit 1
+if ! colab ssh -s "$session" -- /content/start-t3-overflow "$session"; then
+  colab stop -s "$session" >&2
+  exit 1
+fi
+```
+
+Set the teardown command to `colab stop -s "$T3_EPHEMERAL_ALLOCATION_HANDLE"`.
 
 ### Tailscale HTTPS
 

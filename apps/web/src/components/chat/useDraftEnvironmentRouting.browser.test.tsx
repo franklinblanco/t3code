@@ -13,6 +13,7 @@ import { createModelSelection } from "@t3tools/shared/model";
 import { DEFAULT_UNIFIED_SETTINGS } from "@t3tools/contracts/settings";
 import {
   EnvironmentId,
+  EphemeralEnvironmentTemplateId,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -130,7 +131,9 @@ function setup() {
 
 interface HarnessProps {
   input: Parameters<typeof useDraftEnvironmentRouting>[0];
-  onPrepared?: (ready: boolean | null) => void;
+  onPrepared?: (
+    ready: Awaited<ReturnType<ReturnType<typeof useDraftEnvironmentRouting>["refreshBeforeSend"]>>,
+  ) => void;
 }
 
 function Harness(props: HarnessProps) {
@@ -194,12 +197,34 @@ it("refreshes a stored automatic choice before sending an unsent draft", async (
     envMode: "worktree",
     environmentSelection: "auto",
   });
+  const overflow = {
+    template: {
+      id: EphemeralEnvironmentTemplateId.make("overflow"),
+      label: "Overflow machine",
+      enabled: true,
+      weight: 100,
+      provisioner: {
+        kind: "command" as const,
+        provisionCommand: "start",
+        provisionTimeoutSeconds: 180,
+      },
+      idleTimeoutMinutes: 15,
+      maxConcurrentLeases: 1,
+      eligibleRepositoryKeys: [],
+    },
+    reusableLease: null,
+  };
+  const onPrepared = vi.fn();
   await using screen = await render(
-    <Harness input={{ ...input, draftThread: store.getDraftSession(draftId) }} />,
+    <Harness
+      input={{ ...input, overflow, draftThread: store.getDraftSession(draftId) }}
+      onPrepared={onPrepared}
+    />,
   );
   await expect.element(screen.getByText(a)).toBeInTheDocument();
   await screen.getByRole("button", { name: "Send" }).click();
   await expect.element(screen.getByText(b)).toBeInTheDocument();
+  await vi.waitFor(() => expect(onPrepared).toHaveBeenCalledWith(true));
   expect(resources.refreshSelection).toHaveBeenCalledWith([a, b]);
   expect(store.getDraftSession(draftId)).toMatchObject({
     loadBalancedEnvironmentId: b,
